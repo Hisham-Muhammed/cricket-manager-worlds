@@ -30,5 +30,19 @@ actually done and reviewed, in the order it happened.
 ### 2026-10-13 — GitHub phase started
 - Repository prepared for upload (secret scan: no keys in source).
 - This work log + roadmap added.
-- Next: repository upload, then Supabase migration step 1
-  (auth/managers routes).
+- Repository published and the full codebase pushed.
+- Next: Supabase migration step 1 (auth/managers routes).
+
+### 2026-10-13 — Local-mode API test suite (roadmap step 4, pulled forward)
+- Added `test/api.test.js` using Node's built-in test runner — the
+  suite boots the real server against a throwaway JSON database, so
+  it never touches real data and needs no extra dependencies.
+- 11 tests, all passing (`npm test`). They pin the trust rules, not
+  just the happy paths: 6+ character passwords (400), duplicate email
+  (409), wrong login password (401), session required (401), wrong
+  world password → 403 with exactly "Incorrect world password.",
+  joining starts with an empty squad and budget 100 (₹100 Cr),
+  no double-join, no taking a club twice, and the world password hash
+  is never exposed in API responses.
+- Auction/fixture tests stay with roadmap step 4 proper, once the
+  Supabase migration lands.

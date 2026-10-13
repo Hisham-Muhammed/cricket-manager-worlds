@@ -24,6 +24,19 @@ This quick start runs on the local-dev fallback store. For production,
 Supabase is the database/auth backend — see
 [Database: Supabase (production)](#database-supabase-production--local-file-dev).
 
+## Tests
+
+```bash
+npm test
+```
+
+Runs the local-mode API test suite (`test/api.test.js`, Node's built-in
+test runner, no extra dependencies). It boots the real server against a
+throwaway database and pins the game's trust rules: password validation,
+duplicate accounts, the exact "Incorrect world password." rejection,
+empty starting squads with the shared ₹100 Cr budget, and that password
+hashes are never exposed in API responses.
+
 ## Environment variables
 
 | Variable | Purpose |
