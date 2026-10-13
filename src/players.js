@@ -1,0 +1,32 @@
+'use strict';
+// ORIGINAL / REAL player database seed (public factual data: name, age approx. 2026,
+// role, nationality). Ratings / base values are game-balancing numbers.
+module.exports = [
+  ['Virat Kohli',37,'Batsman','India',93,14],['Rohit Sharma',39,'Batsman','India',92,13],
+  ['Jasprit Bumrah',32,'Bowler','India',94,15],['MS Dhoni',45,'Wicket-Keeper','India',89,10],
+  ['Hardik Pandya',33,'All-Rounder','India',88,11],['KL Rahul',34,'Wicket-Keeper','India',87,9],
+  ['Rishabh Pant',29,'Wicket-Keeper','India',88,11],['Shubman Gill',27,'Batsman','India',89,11],
+  ['Ravindra Jadeja',37,'All-Rounder','India',90,12],['Suryakumar Yadav',36,'Batsman','India',88,10],
+  ['Mohammed Siraj',32,'Bowler','India',86,8],['Kuldeep Yadav',31,'Bowler','India',87,9],
+  ['Pat Cummins',33,'Bowler','Australia',91,12],['Steve Smith',37,'Batsman','Australia',89,10],
+  ['Joe Root',35,'Batsman','England',91,12],['Ben Stokes',35,'All-Rounder','England',90,12],
+  ['Jos Buttler',36,'Wicket-Keeper','England',90,12],['Kane Williamson',36,'Batsman','New Zealand',90,11],
+  ['Trent Boult',37,'Bowler','New Zealand',89,10],['Rashid Khan',28,'Bowler','Afghanistan',92,13],
+  ['Babar Azam',32,'Batsman','Pakistan',90,11],['Shaheen Afridi',26,'Bowler','Pakistan',89,11],
+  ['David Warner',39,'Batsman','Australia',87,9],['Glenn Maxwell',38,'All-Rounder','Australia',87,10],
+  ['Travis Head',32,'Batsman','Australia',88,10],['Mitchell Starc',36,'Bowler','Australia',89,10],
+  ['Jofra Archer',31,'Bowler','England',87,9],['Harry Brook',27,'Batsman','England',87,10],
+  ['Quinton de Kock',33,'Wicket-Keeper','South Africa',87,9],['Kagiso Rabada',31,'Bowler','South Africa',90,11],
+  ['Aiden Markram',32,'Batsman','South Africa',86,8],['Heinrich Klaasen',35,'Wicket-Keeper','South Africa',88,10],
+  ['Rachin Ravindra',26,'All-Rounder','New Zealand',86,9],['Shakib Al Hasan',39,'All-Rounder','Bangladesh',86,8],
+  ['Wanindu Hasaranga',29,'All-Rounder','Sri Lanka',86,9],['Axar Patel',32,'All-Rounder','India',86,8],
+  ['Yashasvi Jaiswal',24,'Batsman','India',86,9],['Rinku Singh',29,'Batsman','India',83,6],
+  ['Arshdeep Singh',27,'Bowler','India',84,7],['Tilak Varma',23,'Batsman','India',83,6],
+  ['Abhishek Sharma',26,'Batsman','India',85,8],['Nicholas Pooran',31,'Wicket-Keeper','West Indies',87,9],
+  ['Andre Russell',38,'All-Rounder','West Indies',86,9],['Sunil Narine',38,'All-Rounder','West Indies',87,9],
+].map(([name,age,role,nationality,rating,baseValue], i) => ({
+  id: 'player_' + (i + 1), name, age, role, nationality, rating, baseValue,
+  batting: Math.min(99, rating + (role === 'Batsman' || role === 'Wicket-Keeper' ? 3 : role === 'All-Rounder' ? 0 : -18)),
+  bowling: Math.min(99, rating + (role === 'Bowler' ? 3 : role === 'All-Rounder' ? 0 : -20)),
+  leadership: Math.max(40, rating - (['Virat Kohli','Rohit Sharma','MS Dhoni','Pat Cummins','Kane Williamson','Jos Buttler'].includes(name) ? -8 : 18)),
+}));
