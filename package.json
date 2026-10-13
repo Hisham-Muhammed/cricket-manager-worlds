@@ -1,0 +1,23 @@
+{
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.6",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "@supabase/supabase-js": "^2.45.0"
+  },
+  "description": "Persistent multiplayer cricket management game \u2014 auth, game worlds, 24h player auctions, scheduled auto-simulated matches",
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "main": "src/server.js",
+  "name": "cricket-manager-worlds",
+  "scripts": {
+    "check": "node --check src/server.js && node --check src/db.js && node --check src/supabase.js && node --check src/scheduler.js && node --check src/matchEngine.js",
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js"
+  },
+  "type": "commonjs",
+  "version": "1.0.0"
+}
