@@ -1,0 +1,17 @@
+/* Classic professional manager-game theme (in the spirit of Soccer Manager's
+   login/dashboard look) — original CSS, no third-party assets or logos. */
+*{box-sizing:border-box}body{margin:0;font-family:Arial,Helvetica,sans-serif;background:#0d2137;color:#222;font-size:14px}
+header.top{background:linear-gradient(#173a5e,#0d2137);color:#fff;padding:10px 16px;display:flex;justify-content:space-between;align-items:center;border-bottom:3px solid #7ac143}
+header.top .logo{font-weight:bold;font-size:20px;letter-spacing:.5px}header.top .logo span{color:#7ac143}
+button,.btn{background:#7ac143;border:1px solid #5d9431;color:#fff;padding:7px 14px;cursor:pointer;border-radius:3px;font-weight:bold}
+button.secondary{background:#e8eef4;color:#173a5e;border-color:#b9c9d8}
+button:hover{filter:brightness(1.07)}input,select,textarea{padding:7px;border:1px solid #b9c9d8;border-radius:3px;width:100%;margin:4px 0 10px}
+.login-wrap{max-width:420px;margin:60px auto;background:#fff;border:1px solid #b9c9d8;border-top:4px solid #7ac143;padding:22px;box-shadow:0 4px 18px rgba(0,0,0,.35)}
+.login-wrap h1{margin:0 0 4px;color:#173a5e;font-size:22px}.sub{color:#5a7186;margin-bottom:14px}
+.google{display:block;text-align:center;background:#fff;color:#333;border:1px solid #ccc;padding:8px;text-decoration:none;border-radius:3px;font-weight:bold;margin-bottom:10px}
+main{max-width:1180px;margin:0 auto;background:#f2f5f8;min-height:90vh;padding:14px}
+nav.tabs{display:flex;flex-wrap:wrap;gap:4px;margin:10px 0}nav.tabs button{background:#173a5e;border-color:#0d2137}nav.tabs button.on{background:#7ac143}
+table{width:100%;border-collapse:collapse;background:#fff}th{background:#173a5e;color:#fff;text-align:left;padding:7px}td{padding:7px;border-bottom:1px solid #dde5ec}
+.card{background:#fff;border:1px solid #d3dee8;padding:14px;margin:10px 0}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px}
+.pill{background:#173a5e;color:#fff;border-radius:10px;padding:1px 8px;font-size:12px}.lock{color:#b00}.err{color:#b00}.ok{color:#3d7a17}
+.hidden{display:none} a{color:#173a5e}
