@@ -10,7 +10,10 @@
  *   - "local": local-dev fallback only — the JSON file store in src/db.js,
  *     so `npm install && npm start` works with zero external accounts.
  *
- * The current API routes run on the local store interface in src/db.js,
+ * Migration status: step 1 (auth/managers) is DONE — in supabase mode
+ * register/login/Google sign-in verify identity with Supabase Auth and
+ * the game profile lives in public.managers (see src/server.js). The
+ * remaining routes still run on the local store interface in src/db.js,
  * whose collections map 1:1 to the Supabase tables (see README mapping).
  * To switch a route to Supabase, use getServiceClient() below and the
  * place_bid() Postgres function for atomic bidding; the scheduler must run
@@ -39,4 +42,15 @@ function getServiceClient() {
     { auth: { autoRefreshToken: false, persistSession: false } });
   return cached;
 }
-module.exports = { mode, isConfigured, getServiceClient };
+function getAnonClient() {
+  // Fresh client per call on purpose: a sign-in stores its session on the
+  // client object, and concurrent logins must never share one. The app's
+  // own JWT cookie stays the session — Supabase only verifies identity.
+  if (!process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY) return null;
+  let createClient;
+  try { ({ createClient } = require('@supabase/supabase-js')); }
+  catch { return null; }
+  return createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY,
+    { auth: { autoRefreshToken: false, persistSession: false } });
+}
+module.exports = { mode, isConfigured, getServiceClient, getAnonClient };

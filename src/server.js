@@ -19,11 +19,56 @@ app.use(express.static(path.join(__dirname, '..', 'public')));
 
 // ---------- auth helpers ----------
 function sign(u) { return jwt.sign({ uid: u.id }, SECRET, { expiresIn: '30d' }); }
-function auth(req, res, next) {
+
+// Supabase mode (migration step 1): Supabase Auth is the identity
+// provider and public.managers is the game profile, linked 1:1 by
+// auth_user_id. The app session is still our own JWT cookie whose uid
+// is the managers.id, so every route below sees the same req.user
+// shape in both modes. Without full Supabase config the server falls
+// back to the local store, exactly as before.
+const SUPA_AUTH = supa.mode() === 'supabase' && supa.isConfigured() && !!supa.getAnonClient();
+const managerToUser = m => ({ id: m.id, authUserId: m.auth_user_id, name: m.name, email: m.email, provider: m.provider,
+  profileImage: m.profile_image || '', stats: m.stats, trophies: m.trophies, history: m.history, createdAt: m.created_at });
+async function getManagerById(admin, managerId) {
+  const { data } = await admin.from('managers').select('*').eq('id', managerId).maybeSingle();
+  return data || null;
+}
+async function ensureManager(admin, authUser, provider) {
+  const { data: linked } = await admin.from('managers').select('*').eq('auth_user_id', authUser.id).maybeSingle();
+  if (linked) return linked;
+  const email = authUser.email;
+  if (email) {
+    const { data: byEmail } = await admin.from('managers').select('*').eq('email', email).maybeSingle();
+    if (byEmail) { // link an existing profile to this auth identity
+      const { data, error } = await admin.from('managers').update({ auth_user_id: authUser.id }).eq('id', byEmail.id).select('*').single();
+      if (error) throw error;
+      return data;
+    }
+  }
+  const meta = authUser.user_metadata || {};
+  const { data, error } = await admin.from('managers').insert({
+    auth_user_id: authUser.id, name: meta.name || meta.full_name || email, email,
+    provider: provider || (authUser.app_metadata && authUser.app_metadata.provider) || 'email',
+    profile_image: meta.picture || meta.avatar_url || ''
+  }).select('*').single();
+  if (error) throw error;
+  return data;
+}
+async function auth(req, res, next) {
   const t = req.cookies.token || (req.headers.authorization || '').replace('Bearer ', '');
   if (!t) return res.status(401).json({ error: 'Not logged in.' });
-  try { req.user = load().users.find(u => u.id === jwt.verify(t, SECRET).uid); } catch { return res.status(401).json({ error: 'Session expired.' }); }
-  if (!req.user) return res.status(401).json({ error: 'Not logged in.' });
+  let payload;
+  try { payload = jwt.verify(t, SECRET); } catch { return res.status(401).json({ error: 'Session expired.' }); }
+  try {
+    if (SUPA_AUTH) {
+      const m = await getManagerById(supa.getServiceClient(), payload.uid);
+      if (!m) return res.status(401).json({ error: 'Not logged in.' });
+      req.user = managerToUser(m);
+    } else {
+      req.user = load().users.find(u => u.id === payload.uid);
+      if (!req.user) return res.status(401).json({ error: 'Not logged in.' });
+    }
+  } catch { return res.status(503).json({ error: 'Auth service unavailable.' }); }
   next();
 }
 const pubUser = (db, u) => ({ id: u.id, name: u.name, email: u.email, provider: u.provider, profileImage: u.profileImage || '',
@@ -35,9 +80,27 @@ const memberOf = (db, worldId, userId) => db.memberships.find(m => m.worldId ===
 const tpl = wp => PLAYERS.find(p => p.id === wp.templateId) || {};
 
 // ---------- auth routes ----------
-app.post('/api/auth/register', (req, res) => {
+app.post('/api/auth/register', async (req, res) => {
   const { name, email, password } = req.body || {};
   if (!name || !email || !password || password.length < 6) return res.status(400).json({ error: 'Name, email and a 6+ character password are required.' });
+  if (SUPA_AUTH) {
+    try {
+      const admin = supa.getServiceClient();
+      const normEmail = String(email).toLowerCase();
+      const { data: existing } = await admin.from('managers').select('id').eq('email', normEmail).maybeSingle();
+      if (existing) return res.status(409).json({ error: 'An account with this email already exists.' });
+      const { data: created, error } = await admin.auth.admin.createUser({ email: normEmail, password, email_confirm: true, user_metadata: { name } });
+      if (error) {
+        if (/already|exists|registered/i.test(error.message || '')) return res.status(409).json({ error: 'An account with this email already exists.' });
+        return res.status(502).json({ error: 'Could not create the account. Please try again.' });
+      }
+      const { data: m, error: insErr } = await admin.from('managers')
+        .insert({ auth_user_id: created.user.id, name, email: normEmail, provider: 'email' }).select('*').single();
+      if (insErr) return res.status(502).json({ error: 'Could not create the account. Please try again.' });
+      const u = managerToUser(m);
+      return res.cookie('token', sign(u), { httpOnly: true, sameSite: 'lax', maxAge: 30 * 864e5 }).json({ user: pubUser(load(), u), serverNow: nowISO() });
+    } catch { return res.status(503).json({ error: 'Auth service unavailable.' }); }
+  }
   const db = load();
   if (db.users.some(u => u.email.toLowerCase() === email.toLowerCase())) return res.status(409).json({ error: 'An account with this email already exists.' });
   const u = { id: id('mgr'), name, email, passwordHash: bcrypt.hashSync(password, 12), provider: 'email', profileImage: '', createdAt: nowISO(),
@@ -45,8 +108,19 @@ app.post('/api/auth/register', (req, res) => {
   db.users.push(u); save();
   res.cookie('token', sign(u), { httpOnly: true, sameSite: 'lax', maxAge: 30 * 864e5 }).json({ user: pubUser(db, u), serverNow: nowISO() });
 });
-app.post('/api/auth/login', (req, res) => {
-  const { email, password } = req.body || {}; const db = load();
+app.post('/api/auth/login', async (req, res) => {
+  const { email, password } = req.body || {};
+  if (SUPA_AUTH) {
+    try {
+      const anon = supa.getAnonClient();
+      const { data, error } = await anon.auth.signInWithPassword({ email: String(email || ''), password: password || '' });
+      if (error || !data || !data.user) return res.status(401).json({ error: 'Invalid email or password.' });
+      const m = await ensureManager(supa.getServiceClient(), data.user, 'email');
+      const u = managerToUser(m);
+      return res.cookie('token', sign(u), { httpOnly: true, sameSite: 'lax', maxAge: 30 * 864e5 }).json({ user: pubUser(load(), u), serverNow: nowISO() });
+    } catch { return res.status(503).json({ error: 'Auth service unavailable.' }); }
+  }
+  const db = load();
   const u = db.users.find(x => x.email.toLowerCase() === String(email || '').toLowerCase());
   if (!u || !u.passwordHash || !bcrypt.compareSync(password || '', u.passwordHash)) return res.status(401).json({ error: 'Invalid email or password.' });
   res.cookie('token', sign(u), { httpOnly: true, sameSite: 'lax', maxAge: 30 * 864e5 }).json({ user: pubUser(db, u), serverNow: nowISO() });
@@ -58,11 +132,35 @@ app.get('/api/auth/me', auth, (req, res) => { const db = load();
 
 // Google OAuth — real flow; without credentials it says so, it never fake-logs-in.
 app.get('/api/auth/google', (req, res) => {
+  if (SUPA_AUTH) {
+    // Identity via Supabase Auth (Google provider is enabled there). It
+    // redirects back to the site root with the session in the URL hash;
+    // public/app.js hands the access token to the session route below,
+    // which verifies it and links/creates the manager profile.
+    const redirectTo = `${req.protocol}://${req.get('host')}/`;
+    return res.redirect(`${process.env.SUPABASE_URL}/auth/v1/authorize?provider=google&redirect_to=${encodeURIComponent(redirectTo)}`);
+  }
   if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET)
     return res.status(501).send('Google OAuth needs configuration: set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET (see README / .env.example), then restart the server. Email login works without it.');
   const p = new URLSearchParams({ client_id: process.env.GOOGLE_CLIENT_ID, redirect_uri: process.env.GOOGLE_CALLBACK_URL || 'http://localhost:3000/api/auth/google/callback',
     response_type: 'code', scope: 'openid email profile', access_type: 'offline', prompt: 'select_account' });
   res.redirect('https://accounts.google.com/o/oauth2/v2/auth?' + p);
+});
+app.post('/api/auth/google/session', async (req, res) => {
+  // Supabase mode only: the token comes from the Supabase OAuth redirect
+  // (URL hash, forwarded by the frontend). It is verified against
+  // Supabase Auth here — a bare name/email is never trusted.
+  if (!SUPA_AUTH) return res.status(404).json({ error: 'Not available in local mode.' });
+  const accessToken = (req.body || {}).accessToken;
+  if (!accessToken) return res.status(400).json({ error: 'Missing access token.' });
+  try {
+    const admin = supa.getServiceClient();
+    const { data, error } = await admin.auth.getUser(accessToken);
+    if (error || !data || !data.user || !data.user.email) return res.status(401).json({ error: 'Google sign-in failed.' });
+    const m = await ensureManager(admin, data.user, 'google');
+    const u = managerToUser(m);
+    return res.cookie('token', sign(u), { httpOnly: true, sameSite: 'lax', maxAge: 30 * 864e5 }).json({ user: pubUser(load(), u), serverNow: nowISO() });
+  } catch { return res.status(503).json({ error: 'Auth service unavailable.' }); }
 });
 app.get('/api/auth/google/callback', async (req, res) => {
   try {
