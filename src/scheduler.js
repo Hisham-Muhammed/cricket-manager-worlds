@@ -29,8 +29,14 @@ let ticking = false;
 function startWorld(db, world) {
   const now = Date.now();
   if (!world.auctionStartAt || new Date(world.auctionStartAt).getTime() > now) world.auctionStartAt = nowISO();
-  const minSeason = new Date(world.auctionStartAt).getTime() + 3 * 24 * 3600 * 1000;
-  if (!world.seasonStartAt || new Date(world.seasonStartAt).getTime() < minSeason)
+  // Fast (test) pace compresses the run-up to the season: draft
+  // worlds (no auction) start ~2 minutes after the creator start;
+  // auction worlds get the 10-minute auction plus a 2-minute
+  // squad-building buffer. Standard pace is unchanged (3 days).
+  const fast = world.pace === 'fast';
+  const minSeasonMs = fast ? (world.squadMode === 'draft' ? 2 : 12) * 60000 : 3 * 24 * 3600 * 1000;
+  const minSeason = new Date(world.auctionStartAt).getTime() + minSeasonMs;
+  if (fast || !world.seasonStartAt || new Date(world.seasonStartAt).getTime() < minSeason)
     world.seasonStartAt = new Date(minSeason).toISOString();
   if (world.squadMode === 'draft') {
     // Draft mode: no auction — squads are distributed equally and the
@@ -46,7 +52,7 @@ function startWorld(db, world) {
   world.state = 'AUCTION';
   openAuctions(db, world);
   emit(db, world.id, 'WORLD_STARTED', { name: world.name });
-  news(db, world.id, 'WORLD_STARTED', 'World started', 'The player auction is open for 24 hours.');
+  news(db, world.id, 'WORLD_STARTED', 'World started', world.pace === 'fast' ? 'The player auction is open for 10 minutes (fast pace).' : 'The player auction is open for 24 hours.');
   db.memberships.filter(m => m.worldId === world.id)
     .forEach(m => notify(db, m.userId, world.id, 'WORLD_STARTED', `World "${world.name}" has started — the player auction is open.`));
 }
@@ -204,7 +210,7 @@ function aiTakeTurn(db, world) {
   const aiMembers = db.memberships.filter(m => m.worldId === world.id && m.ai);
   if (!aiMembers.length) return false;
   const open = db.auctions.filter(a => a.worldId === world.id && a.status === 'OPEN'
-    && new Date(a.auctionEndsAt).getTime() - now > 10 * 60 * 1000); // not the final-minutes chaos
+    && new Date(a.auctionEndsAt).getTime() - now > (world.pace === 'fast' ? 60000 : 10 * 60 * 1000)); // not the final-minutes chaos (final minute in fast pace)
   if (!open.length) return false;
   const ranked = open.map(a => {
     const wp = db.worldPlayers.find(p => p.id === a.worldPlayerId);
@@ -280,14 +286,16 @@ function aiPickTeams(db, world) {
 function openAuctions(db, world) {
   if (db.auctions.some(a => a.worldId === world.id)) return;
   const start = new Date(world.auctionStartAt || Date.now());
+  const fast = world.pace === 'fast';
+  const durationMs = fast ? 10 * 60000 : 24 * 3600 * 1000; // fast pace: a 10-minute auction so the mode is testable end to end
   for (const t of PLAYERS) {
     const wpId = id('wp');
     db.worldPlayers.push({ id: wpId, worldId: world.id, templateId: t.id, ownerMembershipId: null, status: 'IN_MARKET', form: 50, fitness: 100, morale: 70 });
     db.auctions.push({ id: id('auc'), worldId: world.id, worldPlayerId: wpId, baseValue: t.baseValue,
-      auctionStartsAt: start.toISOString(), auctionEndsAt: new Date(start.getTime() + 24 * 3600 * 1000).toISOString(),
+      auctionStartsAt: start.toISOString(), auctionEndsAt: new Date(start.getTime() + durationMs).toISOString(),
       status: 'OPEN', highestBidId: null, relistCount: 0 });
   }
-  emit(db, world.id, 'AUCTION_STARTED', {}); news(db, world.id, 'AUCTION_STARTED', 'Player auction is open', `${PLAYERS.length} players are in the central market for 24 hours.`);
+  emit(db, world.id, 'AUCTION_STARTED', {}); news(db, world.id, 'AUCTION_STARTED', 'Player auction is open', `${PLAYERS.length} players are in the central market for ${fast ? '10 minutes (fast pace)' : '24 hours'}.`);
 }
 
 function settleAuction(db, auction) {
@@ -297,9 +305,10 @@ function settleAuction(db, auction) {
   const wp = db.worldPlayers.find(p => p.id === auction.worldPlayerId);
   const tpl = PLAYERS.find(p => p.id === (wp && wp.templateId)) || {};
   auction.status = 'EXPIRED'; emit(db, auction.worldId, 'AUCTION_EXPIRED', { auctionId: auction.id });
-  if (!bids.length) { // no offers -> relist for another 24h
+  if (!bids.length) { // no offers -> relist for another window (24h standard, 10 min fast pace)
+    const w = db.worlds.find(x => x.id === auction.worldId);
     auction.status = 'OPEN'; auction.relistCount = (auction.relistCount || 0) + 1;
-    auction.auctionStartsAt = nowISO(); auction.auctionEndsAt = new Date(Date.now() + 24 * 3600 * 1000).toISOString();
+    auction.auctionStartsAt = nowISO(); auction.auctionEndsAt = new Date(Date.now() + (w && w.pace === 'fast' ? 10 * 60000 : 24 * 3600 * 1000)).toISOString();
     return;
   }
   const win = bids[0];
@@ -342,11 +351,97 @@ function applyResult(db, world, fixture, result) {
   }
 }
 
+/* ------------------------------------------------------------------ *
+ * Season rollover — the loop after SEASON_FINISHED.
+ *
+ * When the last fixture of a season completes, finishSeason() records
+ * the final standings + champion on the world and stamps
+ * seasonFinishedAt. After a gap (standard: 3 days; fast pace: 10
+ * minutes) the tick runs rolloverSeason(): prize money is paid by
+ * final position, the league table resets, players refresh (form to
+ * a fresh random 60–75, morale halfway back to 70, rating drifts
+ * −1/0/+1 — kept as a capped per-player ratingDelta so it persists),
+ * squads and ownership are RETAINED, fresh fixtures are generated and
+ * the world goes straight back to ACTIVE_SEASON at seasonNumber+1
+ * (passing briefly through OFF_SEASON inside the same transition).
+ * ------------------------------------------------------------------ */
+const PRIZE_TABLE = [20, 15, 12, 10, 8, 7, 6, 5, 4, 3]; // ₹ Cr for positions 1..10; fewer clubs take the table by position index
+const ROLLOVER_GAP_MS = { standard: 3 * 24 * 3600 * 1000, fast: 10 * 60000 };
+const rolloverGapMs = world => ROLLOVER_GAP_MS[world.pace === 'fast' ? 'fast' : 'standard'];
+
+function finalStandings(db, world) {
+  const club = mid => (db.memberships.find(m => m.id === mid) || {}).clubName || '—';
+  return db.league.filter(l => l.worldId === world.id)
+    .sort((a, b) => b.points - a.points || b.nrr - a.nrr || b.won - a.won)
+    .map((l, i) => ({ position: i + 1, membershipId: l.membershipId, clubName: club(l.membershipId),
+      played: l.played, won: l.won, lost: l.lost, tied: l.tied, points: l.points, nrr: l.nrr }));
+}
+
+function finishSeason(db, world) {
+  const standings = finalStandings(db, world);
+  const champion = standings[0] || null;
+  world.lastSeasonStandings = standings;
+  world.championMembershipId = champion ? champion.membershipId : null;
+  world.seasonFinishedAt = nowISO();
+  world.state = 'SEASON_FINISHED';
+  const season = world.seasonNumber || 1;
+  emit(db, world.id, 'SEASON_COMPLETED', { season, champion: champion ? champion.clubName : null, championMembershipId: world.championMembershipId });
+  news(db, world.id, 'SEASON_COMPLETED', `Season ${season} complete — ${champion ? champion.clubName : '—'} are champions!`,
+    champion ? `${champion.clubName} topped the table with ${champion.points} points. Prize money is paid when the next season is set up.` : '');
+}
+
+function rolloverSeason(db, world) {
+  const season = world.seasonNumber || 1;
+  // Normally finishSeason() already snapshotted the final table; if a
+  // world reached SEASON_FINISHED without one (older saves), rebuild
+  // it from the league rows before they are reset below.
+  if (!(Array.isArray(world.lastSeasonStandings) && world.lastSeasonStandings.length)) {
+    world.lastSeasonStandings = finalStandings(db, world);
+    world.championMembershipId = world.lastSeasonStandings.length ? world.lastSeasonStandings[0].membershipId : null;
+  }
+  const standings = world.lastSeasonStandings;
+  // Prize money by final position (paid into the retained budgets).
+  const awards = standings.map(s => ({ ...s, prize: PRIZE_TABLE[s.position - 1] || 0 }));
+  for (const a of awards) {
+    if (!a.prize) continue;
+    const m = db.memberships.find(x => x.id === a.membershipId);
+    if (m) m.budget = +(m.budget + a.prize).toFixed(2);
+  }
+  emit(db, world.id, 'PRIZE_MONEY', { season, awards: awards.map(a => ({ club: a.clubName, position: a.position, amount: a.prize })) });
+  // League table resets for the new season (rows are kept, counters zeroed).
+  for (const l of db.league.filter(l => l.worldId === world.id))
+    Object.assign(l, { played: 0, won: 0, lost: 0, tied: 0, points: 0, runsFor: 0, runsAgainst: 0, nrr: 0 });
+  // Player refresh: squads/ownership retained; form re-rolled to
+  // 60–75, morale pulled halfway back to 70, and each player's rating
+  // drifts −1/0/+1 (stored as ratingDelta, capped at ±3 over a career).
+  for (const p of db.worldPlayers.filter(p => p.worldId === world.id)) {
+    p.form = 60 + Math.floor(Math.random() * 16);
+    const morale = p.morale ?? 70;
+    p.morale = Math.round(morale + (70 - morale) / 2);
+    p.ratingDelta = Math.max(-3, Math.min(3, (p.ratingDelta || 0) + (Math.floor(Math.random() * 3) - 1)));
+  }
+  world.seasonNumber = season + 1;
+  world.state = 'OFF_SEASON'; // brief — the new season is set up in the same transition below
+  world.seasonStartAt = new Date(Date.now() + (world.pace === 'fast' ? 2 * 60000 : 24 * 3600 * 1000)).toISOString();
+  const fx = generateFixtures(db, world);
+  db.fixtures.push(...fx);
+  aiPickTeams(db, world); // AI managers re-pick XI/tactics for the new season
+  world.state = 'ACTIVE_SEASON';
+  world.seasonFinishedAt = null;
+  emit(db, world.id, 'NEW_SEASON', { season: world.seasonNumber, fixtures: fx.length });
+  news(db, world.id, 'NEW_SEASON', `Season ${world.seasonNumber} fixtures released`,
+    `${fx.length} fixtures generated for season ${world.seasonNumber} of "${world.name}". Squads carry over; prize money from season ${season} has been paid.`);
+  db.memberships.filter(m => m.worldId === world.id)
+    .forEach(m => notify(db, m.userId, world.id, 'NEW_SEASON', `Season ${world.seasonNumber} has started in "${world.name}" — fixtures are out and prize money has been paid.`));
+  return fx.length;
+}
+
 function tick() {
   if (ticking) return; ticking = true;
   try {
     const db = load(); const now = Date.now(); let changed = false;
     for (const world of db.worlds) {
+      if (!world.seasonNumber) { world.seasonNumber = 1; changed = true; } // worlds created before season numbering
       // State machine, driven by stored server timestamps
       if (world.state === 'CREATED') { world.state = 'RECRUITING'; changed = true; }
       if (world.state === 'RECRUITING' && world.auctionStartAt && now >= new Date(world.auctionStartAt).getTime()) {
@@ -367,7 +462,22 @@ function tick() {
       }
       if (world.state === 'ACTIVE_SEASON') {
         const mine = db.fixtures.filter(f => f.worldId === world.id);
-        if (mine.length && mine.every(f => ['COMPLETED', 'CANCELLED'].includes(f.status))) { world.state = 'SEASON_FINISHED'; emit(db, world.id, 'SEASON_COMPLETED', {}); changed = true; }
+        if (mine.length && mine.every(f => ['COMPLETED', 'CANCELLED'].includes(f.status))) { finishSeason(db, world); changed = true; }
+      }
+      if (world.state === 'SEASON_FINISHED') {
+        if (!world.seasonFinishedAt) {
+          // Finished before rollover tracking existed: start the gap
+          // clock now and snapshot the final table if it is missing.
+          world.seasonFinishedAt = nowISO();
+          if (!Array.isArray(world.lastSeasonStandings)) {
+            const s = finalStandings(db, world);
+            world.lastSeasonStandings = s;
+            world.championMembershipId = s.length ? s[0].membershipId : null;
+          }
+          changed = true;
+        } else if (now >= new Date(world.seasonFinishedAt).getTime() + rolloverGapMs(world)) {
+          rolloverSeason(db, world); changed = true;
+        }
       }
       // AI managers bid while the auction is live (same rules as humans)
       if (world.state === 'AUCTION' && aiTakeTurn(db, world)) changed = true;
@@ -404,4 +514,4 @@ function startScheduler() {
   setInterval(() => { try { tick(); } catch (e) { console.error('[scheduler]', e); } }, ms);
   console.log(`[scheduler] ticking every ${ms}ms (server time is source of truth)`);
 }
-module.exports = { tick, startScheduler, settleAuction, openAuctions, startWorld, aiPickTeams, distributeDraft, AI_WARCHEST_FRACTION, DRAFT_SQUAD_SIZE, DRAFT_MIN_WK, DRAFT_MIN_BOWL, DRAFT_MIN_BAT };
+module.exports = { tick, startScheduler, settleAuction, openAuctions, startWorld, aiPickTeams, distributeDraft, finishSeason, rolloverSeason, finalStandings, PRIZE_TABLE, ROLLOVER_GAP_MS, AI_WARCHEST_FRACTION, DRAFT_SQUAD_SIZE, DRAFT_MIN_WK, DRAFT_MIN_BOWL, DRAFT_MIN_BAT };
