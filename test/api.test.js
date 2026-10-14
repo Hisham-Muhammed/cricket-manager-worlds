@@ -845,3 +845,240 @@ test('bug 3 (server): a session cookie stays valid across a server restart (stat
     assert.equal(j.user.email, MANAGER_A.email);
   } finally { srv.kill('SIGKILL'); if (dir) fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+/* ================================================================== *
+ * World Mode 2 — draft distribution + transfer market                *
+ * ================================================================== */
+const { distributeDraft } = require('../src/scheduler');
+const offersMod = require('../src/offers');
+const tplById = tid => PLAYERS_T.find(t => t.id === tid);
+
+test('draft distribution: 20 per club, role quotas, totals within 2% of the mean (unit)', () => {
+  for (const n of [2, 4, 10]) {
+    const db = { users: [], worlds: [{ id: 'wd' + n, createdAt: '2026-10-14T00:00:00.000Z', squadMode: 'draft' }],
+      memberships: [], worldPlayers: [], auctions: [], bids: [], fixtures: [], events: [], notifications: [], news: [], watchlist: [], league: [], offers: [] };
+    for (let i = 0; i < n; i++) db.memberships.push({ id: 'dm' + i, worldId: 'wd' + n, userId: 'du' + i, clubName: 'Club ' + i, budget: 100, xi: [], tactics: null, captainId: null, viceCaptainId: null });
+    const assigned = distributeDraft(db, db.worlds[0]);
+    assert.equal(assigned, n * 20);
+    assert.equal(db.worldPlayers.length, 409, 'every template gets a world-player row');
+    const totals = [];
+    for (const m of db.memberships) {
+      const squad = db.worldPlayers.filter(p => p.ownerMembershipId === m.id);
+      assert.equal(squad.length, 20, `${m.clubName} gets exactly 20 players`);
+      assert.ok(squad.every(p => p.status === 'OWNED'));
+      const tpl = squad.map(p => tplById(p.templateId));
+      assert.ok(tpl.filter(t => t.role === 'Wicket-Keeper').length >= 2, 'at least 2 wicket-keepers');
+      assert.ok(tpl.filter(t => t.role === 'Bowler' || t.role === 'All-Rounder').length >= 6, 'at least 6 bowling options');
+      assert.ok(tpl.filter(t => ['Batsman', 'All-Rounder', 'Wicket-Keeper'].includes(t.role)).length >= 7, 'at least 7 batting-capable');
+      totals.push(tpl.reduce((s, t) => s + t.rating, 0));
+      assert.equal(m.budget, 100, 'distribution costs nothing — budget stays at ₹100 Cr');
+    }
+    const mean = totals.reduce((s, x) => s + x, 0) / n;
+    const spread = (Math.max(...totals) - Math.min(...totals)) / mean;
+    console.log(`  draft N=${n}: club total ratings min=${Math.min(...totals)} max=${Math.max(...totals)} mean=${mean.toFixed(1)} spread=${(spread * 100).toFixed(2)}%`);
+    assert.ok(spread <= 0.02, `club totals within ~2% of the mean (spread ${(spread * 100).toFixed(2)}%)`);
+    assert.ok(db.news.some(x => x.headline === 'Squads distributed'), 'posts the "Squads distributed" news item');
+    assert.ok(db.events.some(x => x.type === 'SQUADS_DISTRIBUTED'), 'emits the SQUADS_DISTRIBUTED event');
+  }
+});
+
+const MANAGER_E = { name: 'Esha Manager', email: 'esha@example.com', password: 'secret5' };
+const MANAGER_F = { name: 'Farhan Manager', email: 'farhan@example.com', password: 'secret6' };
+let cookieE, cookieF, draftId, memE, memF;
+
+test('draft world: start distributes squads and skips the auction entirely', async () => {
+  const regE = await req('/api/auth/register', { method: 'POST', body: MANAGER_E }); assert.equal(regE.status, 200); cookieE = regE.cookie;
+  const regF = await req('/api/auth/register', { method: 'POST', body: MANAGER_F }); assert.equal(regF.status, 200); cookieF = regF.cookie;
+  const create = await req('/api/worlds', { method: 'POST', cookie: cookieE, body: { name: 'Draft League', numberOfClubs: 2, squadMode: 'draft' } });
+  assert.equal(create.status, 201);
+  assert.equal(create.json.world.squadMode, 'draft', 'squadMode is stored and exposed');
+  draftId = create.json.world.id;
+  const joinE = await req(`/api/worlds/${draftId}/join`, { method: 'POST', cookie: cookieE, body: { clubName: 'Chennai Super Kings' } }); assert.equal(joinE.status, 201);
+  const joinF = await req(`/api/worlds/${draftId}/join`, { method: 'POST', cookie: cookieF, body: { clubName: 'Mumbai Indians' } }); assert.equal(joinF.status, 201);
+  memE = (await req(`/api/worlds/${draftId}`, { cookie: cookieE })).json.myMembership.id;
+  memF = (await req(`/api/worlds/${draftId}`, { cookie: cookieF })).json.myMembership.id;
+  const start = await req(`/api/worlds/${draftId}/start`, { method: 'POST', cookie: cookieE, body: {} });
+  assert.equal(start.status, 200);
+  assert.equal(start.json.world.state, 'SQUAD_BUILDING', 'draft worlds go straight to squad building');
+  const auc = await req(`/api/worlds/${draftId}/auction`, { cookie: cookieE });
+  assert.equal(auc.json.auctions.length, 0, 'draft mode opens no auctions');
+  const sqE = await req(`/api/worlds/${draftId}/squad`, { cookie: cookieE });
+  assert.equal(sqE.json.squad.length, 20);
+  assert.equal(sqE.json.budget, 100);
+  const sqF = await req(`/api/worlds/${draftId}/squad`, { cookie: cookieF });
+  assert.equal(sqF.json.squad.length, 20);
+  assert.equal(sqF.json.budget, 100);
+});
+
+test('transfer offers: create validations, accept with captain promise, reject and withdraw', async () => {
+  const sqE = await req(`/api/worlds/${draftId}/squad`, { cookie: cookieE });
+  const sqF = await req(`/api/worlds/${draftId}/squad`, { cookie: cookieF });
+  const target = sqF.json.squad[0];
+  const own = sqE.json.squad[0];
+  // cannot offer for your own player (400)
+  const ownR = await req(`/api/worlds/${draftId}/offers`, { method: 'POST', cookie: cookieE, body: { toMembershipId: memF, worldPlayerId: own.worldPlayerId, fee: 1 } });
+  assert.equal(ownR.status, 400);
+  // create: fee 5 + bonus 1 with a captaincy promise
+  const c1 = await req(`/api/worlds/${draftId}/offers`, { method: 'POST', cookie: cookieE, body: { toMembershipId: memF, worldPlayerId: target.worldPlayerId, fee: 5, bonus: 1, promise: 'captain' } });
+  assert.equal(c1.status, 201);
+  assert.equal(c1.json.offer.status, 'PENDING');
+  assert.equal(c1.json.offer.total, 6);
+  assert.equal(c1.json.offer.player.name, target.name);
+  // duplicate pending offer for the same player (409)
+  const dup = await req(`/api/worlds/${draftId}/offers`, { method: 'POST', cookie: cookieE, body: { toMembershipId: memF, worldPlayerId: target.worldPlayerId, fee: 7 } });
+  assert.equal(dup.status, 409);
+  // only the seller can accept (buyer trying gets 403)
+  const wrong = await req(`/api/offers/${c1.json.offer.id}/accept`, { method: 'POST', cookie: cookieE, body: {} });
+  assert.equal(wrong.status, 403);
+  // seller accepts -> money moves, ownership moves, promise honoured
+  const acc = await req(`/api/offers/${c1.json.offer.id}/accept`, { method: 'POST', cookie: cookieF, body: {} });
+  assert.equal(acc.status, 200);
+  assert.equal(acc.json.offer.status, 'ACCEPTED');
+  const sqE2 = await req(`/api/worlds/${draftId}/squad`, { cookie: cookieE });
+  assert.equal(sqE2.json.squad.length, 21);
+  assert.ok(sqE2.json.squad.some(p => p.worldPlayerId === target.worldPlayerId), 'player joined the buyer');
+  assert.equal(sqE2.json.budget, 94, 'buyer paid fee + bonus');
+  assert.equal(sqE2.json.captainId, target.worldPlayerId, 'captaincy promise honoured');
+  const sqF2 = await req(`/api/worlds/${draftId}/squad`, { cookie: cookieF });
+  assert.equal(sqF2.json.squad.length, 19);
+  assert.equal(sqF2.json.budget, 106, 'seller received fee + bonus');
+  // reject: a fresh offer the seller turns down
+  const t2 = sqF2.json.squad[0];
+  const c2 = await req(`/api/worlds/${draftId}/offers`, { method: 'POST', cookie: cookieE, body: { toMembershipId: memF, worldPlayerId: t2.worldPlayerId, fee: 2 } });
+  assert.equal(c2.status, 201);
+  const rej = await req(`/api/offers/${c2.json.offer.id}/reject`, { method: 'POST', cookie: cookieF, body: {} });
+  assert.equal(rej.status, 200); assert.equal(rej.json.offer.status, 'REJECTED');
+  // withdraw: a fresh offer the buyer pulls back
+  const t3 = sqF2.json.squad[1];
+  const c3 = await req(`/api/worlds/${draftId}/offers`, { method: 'POST', cookie: cookieE, body: { toMembershipId: memF, worldPlayerId: t3.worldPlayerId, fee: 2 } });
+  assert.equal(c3.status, 201);
+  const wd = await req(`/api/offers/${c3.json.offer.id}/withdraw`, { method: 'POST', cookie: cookieE, body: {} });
+  assert.equal(wd.status, 200); assert.equal(wd.json.offer.status, 'WITHDRAWN');
+  // the offers list resolves names/clubs and directions for the caller
+  const list = await req(`/api/worlds/${draftId}/offers`, { cookie: cookieE });
+  const accepted = list.json.offers.find(o => o.id === c1.json.offer.id);
+  assert.equal(accepted.direction, 'out');
+  assert.equal(accepted.status, 'ACCEPTED');
+  assert.equal(accepted.player.name, target.name);
+  assert.equal(accepted.toClub, 'Mumbai Indians');
+  const listF = await req(`/api/worlds/${draftId}/offers`, { cookie: cookieF });
+  assert.equal(listF.json.offers.find(o => o.id === c1.json.offer.id).direction, 'in');
+});
+
+/* ---- offer unit tests on fabricated databases ---- */
+function fakeTransferDb() {
+  return { users: [], worlds: [{ id: 'wt', createdAt: '2026-10-14T00:00:00.000Z', squadMode: 'draft' }],
+    memberships: [], worldPlayers: [], auctions: [], bids: [], fixtures: [], events: [], notifications: [], news: [], watchlist: [], league: [], offers: [] };
+}
+function fakeClub(db, mid, userId, clubName, count, offset, extra = {}) {
+  const m = { id: mid, worldId: db.worlds[0].id, userId, clubName, budget: 100, xi: [], tactics: null, captainId: null, viceCaptainId: null, ...extra };
+  db.memberships.push(m);
+  for (let i = 0; i < count; i++) {
+    const t = PLAYERS_T[offset + i];
+    db.worldPlayers.push({ id: 'wp_' + mid + '_' + i, worldId: db.worlds[0].id, templateId: t.id, ownerMembershipId: mid, status: 'OWNED', form: 50, fitness: 100, morale: 70 });
+  }
+  return m;
+}
+
+test('offer accept re-validates funds: a buyer whose funds dropped cannot complete (unit)', () => {
+  const db = fakeTransferDb();
+  const buyer = fakeClub(db, 'mb', 'ub', 'Buyer FC', 20, 0);
+  const seller = fakeClub(db, 'ms', 'us', 'Seller FC', 20, 30);
+  const target = db.worldPlayers.find(p => p.ownerMembershipId === 'ms');
+  const made = offersMod.createOffer(db, db.worlds[0], buyer, { toMembershipId: 'ms', worldPlayerId: target.id, fee: 40 });
+  assert.ok(made.offer, 'offer created while funds were sufficient');
+  buyer.budget = 30; // funds dropped below the fee after the offer was made
+  const r = offersMod.applyAccept(db, made.offer);
+  assert.equal(r.ok, undefined);
+  assert.equal(r.status, 409);
+  assert.equal(made.offer.status, 'PENDING', 'a failed acceptance leaves the offer open');
+  assert.equal(target.ownerMembershipId, 'ms', 'nothing moved');
+  assert.equal(seller.budget, 100);
+  assert.equal(buyer.budget, 30);
+});
+
+test('offer accept enforces squad bounds 18–25, swaps included (unit)', () => {
+  // seller at the 18 minimum cannot sell outright
+  let db = fakeTransferDb();
+  let buyer = fakeClub(db, 'mb', 'ub', 'Buyer FC', 20, 0);
+  let seller = fakeClub(db, 'ms', 'us', 'Seller FC', 18, 30);
+  let target = db.worldPlayers.find(p => p.ownerMembershipId === 'ms');
+  let made = offersMod.createOffer(db, db.worlds[0], buyer, { toMembershipId: 'ms', worldPlayerId: target.id, fee: 3 });
+  assert.ok(made.offer);
+  let r = offersMod.applyAccept(db, made.offer);
+  assert.equal(r.status, 409, 'a sale dropping the seller below 18 is blocked');
+  assert.equal(target.ownerMembershipId, 'ms');
+  // buyer at the 25 maximum cannot buy outright...
+  db = fakeTransferDb();
+  buyer = fakeClub(db, 'mb', 'ub', 'Buyer FC', 25, 0);
+  seller = fakeClub(db, 'ms', 'us', 'Seller FC', 20, 40);
+  target = db.worldPlayers.find(p => p.ownerMembershipId === 'ms');
+  made = offersMod.createOffer(db, db.worlds[0], buyer, { toMembershipId: 'ms', worldPlayerId: target.id, fee: 3 });
+  assert.ok(made.offer);
+  r = offersMod.applyAccept(db, made.offer);
+  assert.equal(r.status, 409, 'a purchase pushing the buyer above 25 is blocked');
+  // ...but a swap keeps both squads in bounds and goes through
+  const target2 = db.worldPlayers.filter(p => p.ownerMembershipId === 'ms')[1];
+  const swapP = db.worldPlayers.find(p => p.ownerMembershipId === 'mb');
+  made = offersMod.createOffer(db, db.worlds[0], buyer, { toMembershipId: 'ms', worldPlayerId: target2.id, fee: 3, swapWorldPlayerId: swapP.id });
+  assert.ok(made.offer);
+  r = offersMod.applyAccept(db, made.offer);
+  assert.equal(r.ok, true, 'a swap deal at the bounds is accepted');
+  assert.equal(target2.ownerMembershipId, 'mb');
+  assert.equal(swapP.ownerMembershipId, 'ms');
+  assert.equal(db.worldPlayers.filter(p => p.ownerMembershipId === 'mb').length, 25);
+  assert.equal(db.worldPlayers.filter(p => p.ownerMembershipId === 'ms').length, 20);
+});
+
+test('AI transfer rules: seller threshold + squad floor + swap rating; buyer targets the weakest role (unit)', () => {
+  // --- seller rule ---
+  const db = fakeTransferDb();
+  const human = fakeClub(db, 'mh', 'uh', 'Human FC', 20, 300); // low-rated squad -> a genuinely weak swap player exists
+  fakeClub(db, 'ma', 'ua', 'AI FC', 20, 0, { ai: true }); // star squad
+  const aiSquad = () => db.worldPlayers.filter(p => p.ownerMembershipId === 'ma')
+    .map(p => ({ p, t: tplById(p.templateId) }));
+  // fee at 1.2x base (>= the 1.15x threshold), squad 20 -> auto-accept
+  const top = aiSquad().sort((a, b) => b.t.baseValue - a.t.baseValue)[0];
+  const good = offersMod.createOffer(db, db.worlds[0], human, { toMembershipId: 'ma', worldPlayerId: top.p.id, fee: +(1.2 * top.t.baseValue).toFixed(2) });
+  assert.ok(good.offer);
+  offersMod.aiTransfers(db, db.worlds[0]);
+  assert.equal(good.offer.status, 'ACCEPTED');
+  assert.equal(top.p.ownerMembershipId, 'mh');
+  // fee at 1.0x base (below the threshold) -> auto-reject
+  const next = aiSquad().sort((a, b) => b.t.baseValue - a.t.baseValue)[0];
+  const cheap = offersMod.createOffer(db, db.worlds[0], human, { toMembershipId: 'ma', worldPlayerId: next.p.id, fee: +(1.0 * next.t.baseValue).toFixed(2) });
+  assert.ok(cheap.offer);
+  offersMod.aiTransfers(db, db.worlds[0]);
+  assert.equal(cheap.offer.status, 'REJECTED');
+  assert.equal(next.p.ownerMembershipId, 'ma');
+  // generous fee but a swap player rated more than 2 below the target -> auto-reject
+  const star = aiSquad().sort((a, b) => b.t.rating - a.t.rating)[0];
+  const weakSwap = db.worldPlayers.filter(p => p.ownerMembershipId === 'mh')
+    .map(p => ({ p, t: tplById(p.templateId) })).sort((a, b) => a.t.rating - b.t.rating)[0];
+  assert.ok(weakSwap.t.rating < star.t.rating - 2, 'test setup: swap player is more than 2 below the target');
+  const swapOffer = offersMod.createOffer(db, db.worlds[0], human, { toMembershipId: 'ma', worldPlayerId: star.p.id, fee: 50, swapWorldPlayerId: weakSwap.p.id });
+  assert.ok(swapOffer.offer);
+  offersMod.aiTransfers(db, db.worlds[0]);
+  assert.equal(swapOffer.offer.status, 'REJECTED');
+  // --- buyer rule: a fresh world; the AI buys for its weakest role at 1.1x base ---
+  const db2 = fakeTransferDb();
+  const usedTpl = new Set();
+  const pick = (role, n) => { const out = []; for (const t of PLAYERS_T) { if (t.role === role && !usedTpl.has(t.id)) { out.push(t); usedTpl.add(t.id); if (out.length === n) break; } } return out; };
+  const clubWith = (mid, userId, clubName, templates, extra = {}) => {
+    const m = { id: mid, worldId: db2.worlds[0].id, userId, clubName, budget: 100, xi: [], tactics: null, captainId: null, viceCaptainId: null, ...extra };
+    db2.memberships.push(m);
+    templates.forEach((t, i) => db2.worldPlayers.push({ id: 'wp_' + mid + '_' + i, worldId: db2.worlds[0].id, templateId: t.id, ownerMembershipId: mid, status: 'OWNED', form: 50, fitness: 100, morale: 70 }));
+    return m;
+  };
+  // AI squad: only 2 wicket-keepers -> WK is unambiguously its weakest role
+  clubWith('mh', 'uh', 'Human FC', [...pick('Wicket-Keeper', 5), ...pick('Bowler', 5), ...pick('All-Rounder', 5), ...pick('Batsman', 5)]);
+  clubWith('ma', 'ua', 'AI FC', [...pick('Wicket-Keeper', 2), ...pick('Bowler', 8), ...pick('All-Rounder', 6), ...pick('Batsman', 4)], { ai: true });
+  offersMod.aiTransfers(db2, db2.worlds[0]);
+  const madeOffers = db2.offers.filter(o => o.fromMembershipId === 'ma');
+  assert.equal(madeOffers.length, 1, 'at most one AI offer per world per tick');
+  const mt = tplById(db2.worldPlayers.find(p => p.id === madeOffers[0].worldPlayerId).templateId);
+  assert.equal(mt.role, 'Wicket-Keeper', 'the AI buys for its weakest role');
+  assert.equal(madeOffers[0].fee, +(1.1 * mt.baseValue).toFixed(2), 'the AI offers 1.1x base value');
+  assert.equal(madeOffers[0].status, 'PENDING');
+  assert.equal(madeOffers[0].swapWorldPlayerId, null, 'AI offers carry no swap');
+});

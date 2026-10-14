@@ -395,3 +395,87 @@ First feedback from playing the live Render site, four features:
   judged on tactics the manager actually saved — with nothing saved
   the engine's defaults apply and nobody gains or loses morale,
   so new/casual managers are never punished for not micro-managing.
+
+### 2026-10-14 — World Mode 2: draft squad mode + transfer market
+- **Squad mode at creation**: `POST /api/worlds` accepts `squadMode`
+  — `'auction'` (default; behaviour byte-for-byte unchanged) or
+  `'draft'`. Stored on the world, exposed in every world payload
+  (`pubWorld`), shown as a ⚖️ Draft tag in the Lobby, and selectable
+  in the create-world form ("Auction — empty squads, bid for players"
+  / "Draft — squads distributed equally, then trade"). Waiting Room
+  rules text is mode-aware.
+- **Draft start path** (`startWorld()` and the scheduler's scheduled
+  RECRUITING→start transition both branch on `squadMode`): draft
+  worlds SKIP `openAuctions` and go straight to `SQUAD_BUILDING`;
+  season timing is untouched. `distributeDraft()` (src/scheduler.js)
+  deals every club exactly **20 players** from the 409 templates:
+  the pool is rating-sorted with a seeded shuffle inside equal-rating
+  groups (seeded by world id + createdAt, so worlds differ), dealt
+  quota-first — ≥2 wicket-keepers, ≥6 bowling options (Bowler/
+  All-Rounder), ≥7 batting-capable (Batsman/AR/WK) per club — always
+  to the club that needs the category most (then the lowest total
+  rating), filled to 20 rating-first, and finished with a same-role
+  swap repair pass that pulls club TOTAL ratings inside tolerance
+  (same-role swaps preserve every quota). Assigned players are
+  worldPlayers rows with `ownerMembershipId` set and status `OWNED`
+  at no cost — budgets stay ₹100 Cr; unassigned templates stay in the
+  central market; AI-filled clubs are distributed identically.
+  Emits a `SQUADS_DISTRIBUTED` event + "Squads distributed" news.
+  **Measured balance** (unit test, deterministic): 2 clubs — totals
+  min 1787 / max 1788 (mean 1787.5); 4 clubs — min 1752 / max 1756
+  (mean 1753.5); 10 clubs — min 1595 / max 1610 (mean 1602.0) —
+  spreads of 0.06% / 0.23% / 0.94%, all far inside the ~2% target.
+- **Transfer market** (new `src/offers.js`; offers live in the new
+  `db.offers` collection, back-filled for old saves by `normalize`).
+  Available in BOTH modes once squads exist. Routes:
+  `POST /api/worlds/:id/offers` (member-only; target must be owned by
+  the target club — own player 400; swap player must be the caller's;
+  fee/bonus ≥ 0; duplicate PENDING offer for the same player 409),
+  `GET /api/worlds/:id/offers` (offers involving the caller, player
+  and club names resolved, plus every club's squad list for the form),
+  `POST /api/offers/:id/accept` (seller only), `.../reject` (seller),
+  `.../withdraw` (buyer). An offer carries fee + optional bonus,
+  optional player swap and an optional captaincy promise
+  (`captain`/`vice_captain`), and expires after 72h. **Acceptance
+  re-validates everything** — buyer funds ≥ fee+bonus, both squads
+  stay within 18–25 after the exchange, ownership unchanged — and
+  only then applies atomically: budgets move, ownership swaps, the
+  promise points the buyer's captain/vice-captain at the incoming
+  player, and departed players are scrubbed from the old club's XI,
+  tactics and captaincy. Events, notifications and a
+  "TRANSFER COMPLETED" news item are written. The scheduler tick
+  expires stale PENDING offers.
+- **AI managers in the market** (tick-driven, bounded): an AI seller
+  auto-accepts iff fee+bonus ≥ 1.15× the target's base value AND its
+  squad stays ≥19 after AND (no swap, or the incoming swap player is
+  rated at most 2 below the outgoing one); otherwise it auto-rejects.
+  AI buyers make at most one offer per world per tick — for the
+  highest-rated player filling the AI's weakest role, at 1.1× base
+  value, no swap.
+- **UI**: new "Transfers & Offers" screen (Manage section): create-
+  offer form (target club → their players → fee/bonus/swap/promise),
+  Incoming list with Accept/Reject, Outgoing list with Withdraw,
+  status chips and expiry times; plus a "Make Offer" button on the
+  player detail page when the player is owned by another club in
+  your world, jumping to the form prefilled with that club + player.
+  The player detail API now also returns `ownerMembershipId`.
+- Tests: suite extended 32 → **38 tests, all passing** (`npm test`),
+  `npm run check` clean (now also checks `src/offers.js`). New:
+  draft distribution unit test (20/club, quotas, totals within 2%,
+  budgets 100, event + news) at 2/4/10 clubs; draft-world API test
+  (squadMode exposed, start → SQUAD_BUILDING, zero auctions, squads
+  of 20, budgets 100); offer API test (own player 400, duplicate 409,
+  non-seller accept 403, accept happy path — budgets 100→94/106,
+  ownership, captain promise — reject and withdraw statuses, list
+  directions); unit tests for accept re-validation (buyer funds
+  dropped → 409, nothing moves, offer stays PENDING), squad bounds
+  (seller at 18 / buyer at 25 blocked, swap at the bounds accepted),
+  and the AI rules (1.2× accepted, 1.0× rejected, weak-swap rejected,
+  AI buyer picks its weakest role at 1.1× base, ≤1 offer per tick).
+- Simplifications vs the original ask: the bonus is a flat amount
+  paid together with the fee at acceptance (not appearance- or
+  performance-based); the draft's "snake draft by tiers" is realised
+  as need-first dealing over rating tiers plus the balance repair
+  pass (measured spreads above show it lands far inside tolerance);
+  unassigned pool players in draft mode simply remain in the central
+  market (no auctions exist to sell them through).
