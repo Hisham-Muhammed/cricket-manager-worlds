@@ -1,16 +1,32 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Cricket Manager Worlds</title><link rel="stylesheet" href="/styles.css"></head><body>
-<header class="top"><div class="logo">CRICKET <span>MANAGER</span> WORLDS</div><div id="who"></div></header>
+<header class="top">
+  <div class="brand"><div class="brand-crest">CM</div><div class="brand-name">CRICKET <span>MANAGER</span> WORLDS</div></div>
+  <div class="top-right"><div id="clubChip" class="club-chip hidden"></div><div id="who"></div></div>
+</header>
 
 <section id="authView">
-  <div class="login-wrap"><h1>Manager Login</h1><div class="sub">Sign in to enter the Game World Lobby. New manager? Register below — your first screen is never a club dashboard.</div>
-    <a class="google" href="/api/auth/google">G &nbsp;Sign in with Google</a>
-    <div id="authErr" class="err"></div>
-    <label>Email</label><input id="email" type="email" autocomplete="email">
-    <label>Password</label><input id="password" type="password" autocomplete="current-password">
-    <label>Manager name (register only)</label><input id="mname" type="text">
-    <button id="loginBtn">Login</button> <button id="regBtn" class="secondary">Create account</button>
-    <p class="sub">Google sign-in requires GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET in .env — without them the button explains the configuration needed instead of fake-logging you in.</p>
+  <div class="login-hero">
+    <div class="login-side">
+      <div class="login-kicker">👑 CRICKET MANAGER</div>
+      <h1>CRICKET<br><span>MANAGEMENT</span><br>GAME</h1>
+      <p class="login-tag">Build Your Team<br>Make Big Decisions<br>Compete in a Real Cricket World</p>
+    </div>
+    <div class="login-card">
+      <div class="auth-tabs">
+        <button id="tabSignIn" class="atab on" type="button">Sign In</button>
+        <button id="tabRegister" class="atab" type="button">Create Account</button>
+      </div>
+      <a class="google" href="/api/auth/google"><span class="glogo">G</span> Continue with Google</a>
+      <div class="ordiv"><span>or</span></div>
+      <div id="authErr" class="err"></div>
+      <label>Email address</label><input id="email" type="email" autocomplete="email" placeholder="you@example.com">
+      <label>Password</label><input id="password" type="password" autocomplete="current-password" placeholder="••••••••">
+      <div id="mnameRow" class="hidden"><label>Manager name</label><input id="mname" type="text" placeholder="Your manager name"></div>
+      <button id="loginBtn" class="goldbtn bigbtn">Sign In</button>
+      <button id="regBtn" class="goldbtn bigbtn hidden">Create Account</button>
+      <p class="sub login-note">New manager? Your first screen is the Game World Lobby — never a club dashboard. Google sign-in requires GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET in .env — without them the button explains the configuration needed instead of fake-logging you in.</p>
+    </div>
   </div>
 </section>
 
