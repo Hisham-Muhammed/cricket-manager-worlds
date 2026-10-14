@@ -13,6 +13,7 @@ const { generateFixtures } = require('./fixtures');
 const { simulate } = require('./matchEngine');
 const { withDefaults, buildAutoBowlingPlan } = require('./tactics');
 const { AI_SQUAD_TARGET, topBid, validBids, squadCount, leadingList, validateBid, placeBid } = require('./bids');
+const { expireOffers, aiTransfers } = require('./offers');
 // Share of its budget an AI may have committed to NEW fronts. The rest
 // is a war-chest, kept free so the AI can always defend its targets.
 const AI_WARCHEST_FRACTION = 0.6;
@@ -31,12 +32,141 @@ function startWorld(db, world) {
   const minSeason = new Date(world.auctionStartAt).getTime() + 3 * 24 * 3600 * 1000;
   if (!world.seasonStartAt || new Date(world.seasonStartAt).getTime() < minSeason)
     world.seasonStartAt = new Date(minSeason).toISOString();
+  if (world.squadMode === 'draft') {
+    // Draft mode: no auction — squads are distributed equally and the
+    // world goes straight to squad building (season timing unchanged).
+    distributeDraft(db, world);
+    world.state = 'SQUAD_BUILDING';
+    emit(db, world.id, 'WORLD_STARTED', { name: world.name, squadMode: 'draft' });
+    news(db, world.id, 'WORLD_STARTED', 'World started', 'Squads have been distributed equally to every club — no auction in draft mode. Trade in the transfer market.');
+    db.memberships.filter(m => m.worldId === world.id)
+      .forEach(m => notify(db, m.userId, world.id, 'WORLD_STARTED', `World "${world.name}" has started — your squad of ${DRAFT_SQUAD_SIZE} players is ready.`));
+    return;
+  }
   world.state = 'AUCTION';
   openAuctions(db, world);
   emit(db, world.id, 'WORLD_STARTED', { name: world.name });
   news(db, world.id, 'WORLD_STARTED', 'World started', 'The player auction is open for 24 hours.');
   db.memberships.filter(m => m.worldId === world.id)
     .forEach(m => notify(db, m.userId, world.id, 'WORLD_STARTED', `World "${world.name}" has started — the player auction is open.`));
+}
+
+/* ------------------------------------------------------------------ *
+ * World Mode 2 — draft distribution.
+ *
+ * Every club receives exactly DRAFT_SQUAD_SIZE players from the pool,
+ * balanced so each club's TOTAL rating lands within ~2% of the mean.
+ * The pool is ordered by rating (descending) with a seeded shuffle
+ * inside equal-rating groups, so every world drafts differently.
+ * Dealing is quota-first: clubs short on wicket-keepers get the best
+ * remaining WKs, then bowling options (Bowler/All-Rounder) up to the
+ * quota, then batting-capable players (Batsman/AR/WK); remaining slots
+ * are filled rating-first, always handing the next player to the club
+ * that needs him most (fewest in the category, then lowest total
+ * rating). A final repair pass swaps same-role players between the
+ * strongest and weakest clubs until the spread is inside tolerance —
+ * same-role swaps preserve every quota. Budgets are untouched (₹100 Cr)
+ * and assigned players cost nothing. AI-filled clubs are distributed
+ * identically. Unassigned templates stay in the central market.
+ * ------------------------------------------------------------------ */
+const DRAFT_SQUAD_SIZE = 20, DRAFT_MIN_WK = 2, DRAFT_MIN_BOWL = 6, DRAFT_MIN_BAT = 7;
+const DRAFT_TOLERANCE = 0.02; // max (max-min)/mean spread of club total ratings
+
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function hashString(s) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+
+function distributeDraft(db, world) {
+  if (db.worldPlayers.some(p => p.worldId === world.id)) return 0;
+  const members = db.memberships.filter(m => m.worldId === world.id);
+  const rnd = mulberry32(hashString(String(world.id) + '|' + String(world.createdAt || '')));
+  // rating-descending pool, shuffled inside equal-rating groups
+  const byRating = [...PLAYERS].sort((a, b) => b.rating - a.rating);
+  const pool = [];
+  for (let i = 0; i < byRating.length;) {
+    let j = i;
+    while (j < byRating.length && byRating[j].rating === byRating[i].rating) j++;
+    const grp = byRating.slice(i, j);
+    for (let k = grp.length - 1; k > 0; k--) { const x = Math.floor(rnd() * (k + 1)); [grp[k], grp[x]] = [grp[x], grp[k]]; }
+    pool.push(...grp); i = j;
+  }
+  const isBowl = t => t.role === 'Bowler' || t.role === 'All-Rounder';
+  const isBat = t => t.role === 'Batsman' || t.role === 'All-Rounder' || t.role === 'Wicket-Keeper';
+  const clubs = members.map((m, idx) => ({ m, idx, players: [], total: 0, wk: 0, bowl: 0, bat: 0 }));
+  const used = new Set();
+  const assign = (club, t) => {
+    club.players.push(t); club.total += t.rating; used.add(t.id);
+    if (t.role === 'Wicket-Keeper') club.wk++;
+    if (isBowl(t)) club.bowl++;
+    if (isBat(t)) club.bat++;
+  };
+  // hand the next player to the club that needs the category most
+  const deal = (list, key, quota) => {
+    for (const t of list) {
+      if (clubs.every(c => c[key] >= quota)) break;
+      if (used.has(t.id)) continue;
+      const c = clubs.filter(x => x.players.length < DRAFT_SQUAD_SIZE)
+        .sort((a, b) => a[key] - b[key] || a.total - b.total || a.idx - b.idx)[0];
+      if (!c) break;
+      assign(c, t);
+    }
+  };
+  deal(pool.filter(t => t.role === 'Wicket-Keeper'), 'wk', DRAFT_MIN_WK);
+  deal(pool.filter(isBowl), 'bowl', DRAFT_MIN_BOWL);
+  deal(pool.filter(isBat), 'bat', DRAFT_MIN_BAT);
+  for (const t of pool) { // fill remaining slots, weakest club first
+    if (clubs.every(c => c.players.length >= DRAFT_SQUAD_SIZE)) break;
+    if (used.has(t.id)) continue;
+    const c = clubs.filter(x => x.players.length < DRAFT_SQUAD_SIZE)
+      .sort((a, b) => a.players.length - b.players.length || a.total - b.total || a.idx - b.idx)[0];
+    if (!c) break;
+    assign(c, t);
+  }
+  // repair pass: pull the strongest and weakest club totals together
+  for (let iter = 0; iter < 500 && clubs.length > 1; iter++) {
+    const mean = clubs.reduce((s, c) => s + c.total, 0) / clubs.length;
+    const hi = clubs.reduce((a, c) => c.total > a.total ? c : a, clubs[0]);
+    const lo = clubs.reduce((a, c) => c.total < a.total ? c : a, clubs[0]);
+    const diff = hi.total - lo.total;
+    if (hi === lo || diff <= Math.max(1, DRAFT_TOLERANCE * mean)) break;
+    let best = null;
+    for (const a of hi.players) for (const b of lo.players) {
+      if (a.role !== b.role) continue; // same role => quotas preserved
+      const d = a.rating - b.rating;
+      if (d <= 0) continue;
+      const nd = Math.abs((hi.total - d) - (lo.total + d));
+      if (!best || nd < best.nd) best = { a, b, nd };
+    }
+    if (!best || best.nd >= diff) break;
+    hi.players[hi.players.indexOf(best.a)] = best.b;
+    lo.players[lo.players.indexOf(best.b)] = best.a;
+    hi.total -= best.a.rating - best.b.rating;
+    lo.total += best.a.rating - best.b.rating;
+  }
+  const ownerOf = new Map();
+  clubs.forEach(c => c.players.forEach(t => ownerOf.set(t.id, c.m.id)));
+  for (const t of PLAYERS) {
+    const owner = ownerOf.get(t.id) || null;
+    db.worldPlayers.push({
+      id: id('wp'), worldId: world.id, templateId: t.id, ownerMembershipId: owner,
+      status: owner ? 'OWNED' : 'IN_MARKET', form: 50, fitness: 100, morale: 70
+    });
+  }
+  emit(db, world.id, 'SQUADS_DISTRIBUTED', { clubs: members.length, perClub: DRAFT_SQUAD_SIZE });
+  news(db, world.id, 'SQUADS_DISTRIBUTED', 'Squads distributed',
+    `Every club received ${DRAFT_SQUAD_SIZE} players, balanced by rating and role. Budgets stay at ₹100 Cr — trade with other clubs in the transfer market.`);
+  return members.length * DRAFT_SQUAD_SIZE;
 }
 
 /**
@@ -220,7 +350,9 @@ function tick() {
       // State machine, driven by stored server timestamps
       if (world.state === 'CREATED') { world.state = 'RECRUITING'; changed = true; }
       if (world.state === 'RECRUITING' && world.auctionStartAt && now >= new Date(world.auctionStartAt).getTime()) {
-        world.state = 'AUCTION'; openAuctions(db, world); changed = true;
+        if (world.squadMode === 'draft') { distributeDraft(db, world); world.state = 'SQUAD_BUILDING'; }
+        else { world.state = 'AUCTION'; openAuctions(db, world); }
+        changed = true;
       }
       if (world.state === 'AUCTION' && !db.auctions.some(a => a.worldId === world.id && a.status === 'OPEN')) { world.state = 'SQUAD_BUILDING'; changed = true; }
       if ((world.state === 'SQUAD_BUILDING' || world.state === 'AUCTION') && world.seasonStartAt && now >= new Date(world.seasonStartAt).getTime() - 24 * 3600 * 1000 && world.state !== 'PRE_SEASON') {
@@ -260,6 +392,10 @@ function tick() {
         changed = true;
       }
     }
+    // Transfer market: expire stale offers, then AI managers resolve
+    // offers made to them and (bounded, one per world) make offers.
+    if (expireOffers(db, now)) changed = true;
+    for (const world of db.worlds) if (aiTransfers(db, world)) changed = true;
     if (changed) save();
   } finally { ticking = false; }
 }
@@ -268,4 +404,4 @@ function startScheduler() {
   setInterval(() => { try { tick(); } catch (e) { console.error('[scheduler]', e); } }, ms);
   console.log(`[scheduler] ticking every ${ms}ms (server time is source of truth)`);
 }
-module.exports = { tick, startScheduler, settleAuction, openAuctions, startWorld, aiPickTeams, AI_WARCHEST_FRACTION };
+module.exports = { tick, startScheduler, settleAuction, openAuctions, startWorld, aiPickTeams, distributeDraft, AI_WARCHEST_FRACTION, DRAFT_SQUAD_SIZE, DRAFT_MIN_WK, DRAFT_MIN_BOWL, DRAFT_MIN_BAT };

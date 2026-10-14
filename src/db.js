@@ -42,7 +42,8 @@ const empty = () => ({
   notifications: [],// {id,userId,worldId,message,type,read,createdAt}
   news: [],         // {id,worldId,headline,body,type,createdAt}
   watchlist: [],    // {id,userId,auctionId}
-  league: []        // {id,worldId,membershipId,played,won,lost,tied,points,nrr,runsFor,runsAgainst}
+  league: [],       // {id,worldId,membershipId,played,won,lost,tied,points,nrr,runsFor,runsAgainst}
+  offers: []        // transfer offers {id,worldId,fromMembershipId,toMembershipId,worldPlayerId,fee,bonus,swapWorldPlayerId,promise,status,createdAt,expiresAt,resolvedAt}
 });
 // defaultState() in the design notes = empty() here: a fresh store with
 // every collection present as an empty array.
