@@ -1082,3 +1082,291 @@ test('AI transfer rules: seller threshold + squad floor + swap rating; buyer tar
   assert.equal(madeOffers[0].status, 'PENDING');
   assert.equal(madeOffers[0].swapWorldPlayerId, null, 'AI offers carry no swap');
 });
+
+/* ================================================================== *
+ * Fast pace mode, season rollover, real multi-position preferences  *
+ * ================================================================== */
+const { generateFixtures: genFixtures } = require('../src/fixtures');
+const { computeFit } = require('../src/matchEngine');
+const { openAuctions: openAuc } = require('../src/scheduler');
+
+test('batPositions: stars carry real-life multi-position sets; every template is consistent', () => {
+  const dhoni = PLAYERS_T.find(p => p.name === 'MS Dhoni');
+  assert.ok(dhoni.batPositions.includes(6) && dhoni.batPositions.includes(7), 'Dhoni is happy at 6 and 7');
+  assert.ok(!dhoni.batPositions.includes(1), 'Dhoni is not an opener');
+  assert.equal(dhoni.prefBatPos, 6);
+  const kohli = PLAYERS_T.find(p => p.name === 'Virat Kohli');
+  assert.deepEqual(kohli.batPositions, [2, 3]);
+  const rahul = PLAYERS_T.find(p => p.name === 'KL Rahul');
+  assert.deepEqual(rahul.batPositions, [1, 2, 4], 'Rahul opens and bats at 4');
+  const narine = PLAYERS_T.find(p => p.name === 'Sunil Narine');
+  assert.ok(narine.batPositions.includes(1) && narine.batPositions.some(x => x >= 7), 'Narine pinch-opens and also finishes');
+  const rashid = PLAYERS_T.find(p => p.name === 'Rashid Khan');
+  assert.deepEqual(rashid.batPositions, [7, 8], 'a handy lower-order hitter, not a pure tail-ender');
+  for (const p of PLAYERS_T) {
+    assert.ok(Array.isArray(p.batPositions) && p.batPositions.length >= 1, `${p.name} has a position set`);
+    assert.deepEqual(p.batPositions, [...p.batPositions].sort((a, b) => a - b), `${p.name} set is sorted`);
+    assert.ok(p.batPositions.includes(p.prefBatPos), `${p.name} primary (prefBatPos) is inside the set`);
+    assert.ok(p.batPositions.every(x => Number.isInteger(x) && x >= 1 && x <= 11), `${p.name} positions are 1–11`);
+    if (p.role === 'Bowler') assert.ok(p.batPositions.every(x => x >= 7), `${p.name} (bowler) only bats in the tail`);
+    if (p.role === 'Batsman' || p.role === 'Wicket-Keeper') assert.ok(p.batPositions.some(x => x <= 7), `${p.name} can bat in the top 7`);
+  }
+});
+
+test('fit: in-set non-primary is happy, 1 outside the set is mild, far outside is severe (computeFit)', () => {
+  const mk = pos => [{ id: 'x1', name: 'Test Player', batPos: pos, prefBatPos: 4, batPositions: [4, 5], prefOvers: [], bowling: 40, role: 'Batsman' }];
+  const tac = { battingOrder: ['x1'], bowlingPlan: {} };
+  const happy = computeFit(mk(5), tac); // in the set, but not the primary (4)
+  const eh = happy.effects.find(e => e.worldPlayerId === 'x1');
+  assert.ok(eh && eh.moraleDelta === 2 && eh.formDelta === 0, 'in-set non-primary: morale bonus, no penalty');
+  assert.equal(happy.misused.length, 0);
+  assert.equal(happy.batPen.x1, 0);
+  const mild = computeFit(mk(6), tac); // 1 position outside the set's edge
+  const em = mild.effects.find(e => e.worldPlayerId === 'x1');
+  assert.equal(em.moraleDelta, -6); assert.equal(em.formDelta, -3);
+  assert.equal(mild.batPen.x1, 3); assert.equal(mild.misused.length, 1);
+  const severe = computeFit(mk(9), tac); // 4 positions outside the set
+  const es = severe.effects.find(e => e.worldPlayerId === 'x1');
+  assert.equal(es.moraleDelta, -12); assert.equal(es.formDelta, -6);
+  assert.equal(severe.batPen.x1, 6); assert.equal(severe.misused.length, 1);
+});
+
+test('fast pace fixtures: rounds 10 minutes apart, 2-minute locks; standard stays 3 days / 30 minutes (unit)', () => {
+  const two = { memberships: [{ id: 'fm1', worldId: 'wf' }, { id: 'fm2', worldId: 'wf' }] };
+  const fx = genFixtures(two, { id: 'wf', pace: 'fast', seasonStartAt: '2026-10-14T12:00:00.000Z', matchIntervalMinutes: 10, format: 'League (Home & Away)' });
+  assert.equal(fx.length, 2);
+  assert.equal(fx[0].scheduledAt, '2026-10-14T12:00:00.000Z', 'first round at the season start');
+  assert.equal(new Date(fx[1].scheduledAt) - new Date(fx[0].scheduledAt), 10 * 60000, 'rounds 10 minutes apart');
+  for (const f of fx) assert.equal(new Date(f.scheduledAt) - new Date(f.tacticalLockAt), 2 * 60000, 'fast lock is 2 minutes');
+  const fxS = genFixtures(two, { id: 'wf', pace: 'standard', seasonStartAt: '2026-10-14T12:00:00.000Z', matchIntervalDays: 3, matchTime: '20:00', format: 'League (Home & Away)' });
+  assert.equal(new Date(fxS[1].scheduledAt) - new Date(fxS[0].scheduledAt), 3 * 24 * 3600 * 1000, 'standard rounds 3 days apart');
+  for (const f of fxS) assert.equal(new Date(f.scheduledAt) - new Date(f.tacticalLockAt), 30 * 60000, 'standard lock is 30 minutes');
+  // a full 10-club fast season: 18 rounds, last round 170 minutes after the first (~3h end to end)
+  const ten = { memberships: Array.from({ length: 10 }, (_, i) => ({ id: 'tm' + i, worldId: 'wt' })) };
+  const fxT = genFixtures(ten, { id: 'wt', pace: 'fast', seasonStartAt: '2026-10-14T12:00:00.000Z', matchIntervalMinutes: 10, format: 'League (Home & Away)' });
+  assert.equal(fxT.length, 90);
+  assert.equal(Math.max(...fxT.map(f => f.round)), 18);
+  const span = Math.max(...fxT.map(f => new Date(f.scheduledAt))) - Math.min(...fxT.map(f => new Date(f.scheduledAt)));
+  assert.equal(span, 17 * 10 * 60000, '18 rounds span 170 minutes');
+});
+
+test('fast pace auctions run 10 minutes; standard auctions stay 24 hours (unit)', () => {
+  const mkDb = () => ({ users: [], worlds: [], memberships: [], worldPlayers: [], auctions: [], bids: [], fixtures: [], events: [], notifications: [], news: [], watchlist: [], league: [], offers: [] });
+  const dbF = mkDb();
+  openAuc(dbF, { id: 'wf2', pace: 'fast', auctionStartAt: new Date().toISOString() });
+  assert.equal(new Date(dbF.auctions[0].auctionEndsAt) - new Date(dbF.auctions[0].auctionStartsAt), 10 * 60000);
+  const dbS = mkDb();
+  openAuc(dbS, { id: 'ws2', pace: 'standard', auctionStartAt: new Date().toISOString() });
+  assert.equal(new Date(dbS.auctions[0].auctionEndsAt) - new Date(dbS.auctions[0].auctionStartsAt), 24 * 3600 * 1000);
+});
+
+test('pace: create-world stores pace + seasonNumber 1; unknown pace falls back to standard', async () => {
+  const reg = await req('/api/auth/register', { method: 'POST', body: { name: 'Pace Tester', email: 'pace@example.com', password: 'secret9' } });
+  assert.equal(reg.status, 200);
+  const std = await req('/api/worlds', { method: 'POST', cookie: reg.cookie, body: { name: 'Standard Pace World', numberOfClubs: 2 } });
+  assert.equal(std.status, 201);
+  assert.equal(std.json.world.pace, 'standard');
+  assert.equal(std.json.world.seasonNumber, 1);
+  const weird = await req('/api/worlds', { method: 'POST', cookie: reg.cookie, body: { name: 'Weird Pace World', numberOfClubs: 2, pace: 'ludicrous' } });
+  assert.equal(weird.json.world.pace, 'standard', 'unknown pace values fall back to standard');
+});
+
+test('pace: a fast draft world starts its season ~2 minutes after creator start', async () => {
+  const reg = await req('/api/auth/register', { method: 'POST', body: { name: 'Fast Drafter', email: 'fastdraft@example.com', password: 'secret9' } });
+  assert.equal(reg.status, 200);
+  const ck = reg.cookie;
+  const create = await req('/api/worlds', { method: 'POST', cookie: ck, body: { name: 'Fast Draft League', numberOfClubs: 2, squadMode: 'draft', pace: 'fast' } });
+  assert.equal(create.status, 201);
+  assert.equal(create.json.world.pace, 'fast');
+  const wid = create.json.world.id;
+  const join = await req(`/api/worlds/${wid}/join`, { method: 'POST', cookie: ck, body: { clubName: 'Chennai Super Kings' } });
+  assert.equal(join.status, 201);
+  const before = Date.now();
+  const start = await req(`/api/worlds/${wid}/start`, { method: 'POST', cookie: ck, body: {} });
+  assert.equal(start.status, 200);
+  assert.equal(start.json.world.state, 'SQUAD_BUILDING');
+  const delta = new Date(start.json.world.seasonStartAt).getTime() - before;
+  assert.ok(delta >= 90000 && delta <= 150000, `season starts ~2 min after creator start (got ${Math.round(delta / 1000)}s)`);
+});
+
+test('pace: a fast auction world opens 10-minute auctions on creator start', async () => {
+  const reg = await req('/api/auth/register', { method: 'POST', body: { name: 'Fast Bidder', email: 'fastbid@example.com', password: 'secret9' } });
+  assert.equal(reg.status, 200);
+  const ck = reg.cookie;
+  const create = await req('/api/worlds', { method: 'POST', cookie: ck, body: { name: 'Fast Auction League', numberOfClubs: 2, pace: 'fast' } });
+  assert.equal(create.status, 201);
+  const wid = create.json.world.id;
+  const join = await req(`/api/worlds/${wid}/join`, { method: 'POST', cookie: ck, body: { clubName: 'Chennai Super Kings' } });
+  assert.equal(join.status, 201);
+  const before = Date.now();
+  const start = await req(`/api/worlds/${wid}/start`, { method: 'POST', cookie: ck, body: {} });
+  assert.equal(start.status, 200);
+  assert.equal(start.json.world.state, 'AUCTION');
+  const seasonDelta = new Date(start.json.world.seasonStartAt).getTime() - before;
+  assert.ok(seasonDelta >= 11 * 60000 && seasonDelta <= 13 * 60000, `auction-mode season follows the 10-min auction + 2-min buffer (got ${Math.round(seasonDelta / 60000)} min)`);
+  const auc = await req(`/api/worlds/${wid}/auction`, { cookie: ck });
+  assert.ok(auc.json.auctions.length > 0);
+  const a = auc.json.auctions[0];
+  assert.equal(new Date(a.auctionEndsAt) - new Date(a.auctionStartsAt), 10 * 60000, 'fast auctions run 10 minutes');
+  assert.ok(Array.isArray(a.player.batPositions) && a.player.batPositions.includes(a.player.prefBatPos), 'player payloads carry batPositions with the primary inside');
+});
+
+/* ---- season rollover: seeded server with a fast (250 ms) tick ---- */
+async function spawnTickingServer(port, seed, intervalMs) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cmw-tick-'));
+  fs.writeFileSync(path.join(dir, 'db.json'), JSON.stringify(seed));
+  const srv = spawn(process.execPath, ['src/server.js'], {
+    cwd: ROOT,
+    env: { ...process.env, PORT: String(port), DATABASE: path.join(dir, 'db.json'),
+      DATABASE_MODE: 'local', SESSION_SECRET: 'test-secret',
+      SUPABASE_URL: '', SUPABASE_ANON_KEY: '', SUPABASE_SERVICE_ROLE_KEY: '',
+      SCHEDULER_INTERVAL_MS: String(intervalMs || 250) },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let log = '';
+  srv.stdout.on('data', d => { log += d; });
+  srv.stderr.on('data', d => { log += d; });
+  const deadline = Date.now() + 20000;
+  while (Date.now() < deadline) {
+    try { const r = await fetch(`http://127.0.0.1:${port}/api/server-time`); if (r.ok) return { srv, dir }; }
+    catch { /* not up yet */ }
+    await new Promise(r => setTimeout(r, 250));
+  }
+  srv.kill('SIGKILL');
+  throw new Error('ticking server did not start:\n' + log);
+}
+async function pollUntil(fn, timeoutMs = 25000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const v = await fn();
+    if (v) return v;
+    await new Promise(r => setTimeout(r, 400));
+  }
+  return null;
+}
+function rolloverSeed() {
+  const hash = bcryptjs.hashSync('secret1', 4);
+  const now = Date.now();
+  const users = [
+    { id: 'u_r1', name: 'Roll One', email: 'roll1@example.com', passwordHash: hash, provider: 'email', profileImage: '', createdAt: new Date(now).toISOString(), stats: {}, trophies: [], history: [] },
+    { id: 'u_r2', name: 'Roll Two', email: 'roll2@example.com', passwordHash: hash, provider: 'email', profileImage: '', createdAt: new Date(now).toISOString(), stats: {}, trophies: [], history: [] },
+  ];
+  const baseWorld = (id, name, extra) => ({ id, name, description: '', creatorId: 'u_r1', numberOfClubs: 2,
+    format: 'League (Home & Away)', competitionStructure: 'Round-robin league', matchIntervalDays: 3, matchIntervalMinutes: 10,
+    matchTime: '20:00', pace: 'fast', timezone: 'Asia/Kolkata', seasonLength: '1 season',
+    startDate: new Date(now - 86400000).toISOString(), auctionStartAt: new Date(now - 86400000).toISOString(),
+    seasonStartAt: new Date(now - 3600000).toISOString(), passwordHash: null, aiFill: false, squadMode: 'draft',
+    seasonNumber: 1, createdAt: new Date(now - 86400000).toISOString(), ...extra });
+  const mkMem = (id, worldId, userId, clubName, budget) => ({ id, worldId, userId, clubName, budget, xi: [],
+    tactics: { formation: 'Balanced', battingApproach: 'Balanced', bowlingApproach: 'Balanced' },
+    captainId: null, viceCaptainId: null, joinedAt: new Date(now - 86400000).toISOString(), lastSeenAt: new Date(now).toISOString() });
+  const mkWps = (prefix, worldId, mid, tplIds, form, morale) => tplIds.map((tid, i) => ({ id: prefix + (i + 1), worldId, templateId: tid,
+    ownerMembershipId: mid, status: 'OWNED', form, fitness: 90, morale }));
+  const tplIds = PLAYERS_T.slice(0, 30).map(t => t.id);
+  const a1 = mkWps('rwp', 'w_roll', 'mem_r1', tplIds.slice(0, 15), 25, 15);
+  const a2 = mkWps('qwp', 'w_roll', 'mem_r2', tplIds.slice(15, 30), 25, 15);
+  const b1 = mkWps('fwp', 'w_fin', 'mem_f1', tplIds.slice(0, 15), 60, 70);
+  const b2 = mkWps('gwp', 'w_fin', 'mem_f2', tplIds.slice(15, 30), 60, 70);
+  const memF1 = mkMem('mem_f1', 'w_fin', 'u_r1', 'Chennai Super Kings', 100);
+  const memF2 = mkMem('mem_f2', 'w_fin', 'u_r2', 'Mumbai Indians', 100);
+  memF1.xi = b1.slice(0, 11).map(w => w.id); memF1.captainId = b1[0].id;
+  memF2.xi = b2.slice(0, 11).map(w => w.id); memF2.captainId = b2[0].id;
+  const due = new Date(now - 60000).toISOString();
+  const lock = new Date(now - 3 * 60000).toISOString();
+  const doneResult = { home: { runs: 150, wickets: 5, overs: '20.0', topScorers: [], bestBowlers: [] },
+    away: { runs: 140, wickets: 8, overs: '20.0', topScorers: [], bestBowlers: [] },
+    winnerMembershipId: 'mem_r1', summary: 'Chennai Super Kings won by 10 runs', report: [] };
+  const doneFx = (id, worldId, round, home, away, at) => ({ id, worldId, round, homeMembershipId: home, awayMembershipId: away,
+    competition: 'Premier League', scheduledAt: at, timezone: 'Asia/Kolkata',
+    tacticalLockAt: new Date(new Date(at).getTime() - 2 * 60000).toISOString(), status: 'COMPLETED', result: doneResult });
+  return {
+    users,
+    worlds: [
+      // season 1 finished 11 minutes ago — past the 10-minute fast rollover gap
+      baseWorld('w_roll', 'Rollover League', { state: 'SEASON_FINISHED', seasonFinishedAt: new Date(now - 11 * 60000).toISOString() }),
+      // season in progress with both fixtures already due
+      baseWorld('w_fin', 'Finishing League', { state: 'ACTIVE_SEASON' }),
+    ],
+    memberships: [
+      mkMem('mem_r1', 'w_roll', 'u_r1', 'Chennai Super Kings', 50),
+      mkMem('mem_r2', 'w_roll', 'u_r2', 'Mumbai Indians', 50),
+      memF1, memF2,
+    ],
+    worldPlayers: [...a1, ...a2, ...b1, ...b2],
+    auctions: [], bids: [],
+    fixtures: [
+      doneFx('fix_r1', 'w_roll', 1, 'mem_r1', 'mem_r2', new Date(now - 3600000).toISOString()),
+      doneFx('fix_r2', 'w_roll', 2, 'mem_r2', 'mem_r1', new Date(now - 3500000).toISOString()),
+      { id: 'fix_f1', worldId: 'w_fin', round: 1, homeMembershipId: 'mem_f1', awayMembershipId: 'mem_f2', competition: 'Premier League', scheduledAt: due, timezone: 'Asia/Kolkata', tacticalLockAt: lock, status: 'SCHEDULED', result: null },
+      { id: 'fix_f2', worldId: 'w_fin', round: 2, homeMembershipId: 'mem_f2', awayMembershipId: 'mem_f1', competition: 'Premier League', scheduledAt: due, timezone: 'Asia/Kolkata', tacticalLockAt: lock, status: 'SCHEDULED', result: null },
+    ],
+    events: [], notifications: [], news: [], watchlist: [], offers: [],
+    league: [
+      { id: 'lgr1', worldId: 'w_roll', membershipId: 'mem_r1', played: 2, won: 2, lost: 0, tied: 0, points: 4, runsFor: 300, runsAgainst: 280, nrr: 0.5 },
+      { id: 'lgr2', worldId: 'w_roll', membershipId: 'mem_r2', played: 2, won: 0, lost: 2, tied: 0, points: 0, runsFor: 280, runsAgainst: 300, nrr: -0.5 },
+      { id: 'lgf1', worldId: 'w_fin', membershipId: 'mem_f1', played: 0, won: 0, lost: 0, tied: 0, points: 0, runsFor: 0, runsAgainst: 0, nrr: 0 },
+      { id: 'lgf2', worldId: 'w_fin', membershipId: 'mem_f2', played: 0, won: 0, lost: 0, tied: 0, points: 0, runsFor: 0, runsAgainst: 0, nrr: 0 },
+    ],
+  };
+}
+
+test('season rollover: prizes paid, table reset, squads retained, season 2 fixtures; a live season finishes with a champion (seeded, fast pace)', async () => {
+  const { srv, dir } = await spawnTickingServer(3231, rolloverSeed());
+  try {
+    const c1 = await loginOn(3231, 'roll1@example.com');
+    // --- world A: already SEASON_FINISHED past the gap -> rolls over ---
+    const rolled = await pollUntil(async () => {
+      const w = await reqOn(3231, '/api/worlds/w_roll', { cookie: c1 });
+      return (w.json.world.seasonNumber === 2 && w.json.world.state === 'ACTIVE_SEASON') ? w.json : null;
+    });
+    assert.ok(rolled, 'world A should roll into season 2');
+    assert.equal(rolled.world.championMembershipId, 'mem_r1', 'champion recorded from the final standings');
+    assert.equal(rolled.world.lastSeasonStandings.length, 2);
+    assert.equal(rolled.world.lastSeasonStandings[0].membershipId, 'mem_r1');
+    assert.equal(rolled.world.lastSeasonStandings[0].position, 1);
+    assert.equal(rolled.world.lastSeasonStandings[0].points, 4, 'the recorded standings are the pre-reset ones');
+    const budgets = Object.fromEntries(rolled.members.map(m => [m.clubName, m.budget]));
+    assert.equal(budgets['Chennai Super Kings'], 70, 'champion prize ₹20 Cr paid (50 + 20)');
+    assert.equal(budgets['Mumbai Indians'], 65, 'runner-up prize ₹15 Cr paid (50 + 15)');
+    const league = await reqOn(3231, '/api/worlds/w_roll/league', { cookie: c1 });
+    assert.ok(league.json.table.every(r => r.played === 0 && r.points === 0), 'league table reset for season 2');
+    const fx = await reqOn(3231, '/api/worlds/w_roll/fixtures', { cookie: c1 });
+    const fresh = fx.json.fixtures.filter(f => ['SCHEDULED', 'PREPARING'].includes(f.status))
+      .sort((a, b) => new Date(a.scheduledAt) - new Date(b.scheduledAt));
+    assert.equal(fresh.length, 2, 'season 2 fixtures generated');
+    assert.equal(new Date(fresh[1].scheduledAt) - new Date(fresh[0].scheduledAt), 10 * 60000, 'fast rounds 10 minutes apart');
+    assert.equal(new Date(fresh[0].scheduledAt) - new Date(fresh[0].tacticalLockAt), 2 * 60000, 'fast tactical lock is 2 minutes');
+    const squad = await reqOn(3231, '/api/worlds/w_roll/squad', { cookie: c1 });
+    assert.equal(squad.json.squad.length, 15, 'squad retained across the rollover');
+    for (const p of squad.json.squad) {
+      assert.ok(p.form >= 60 && p.form <= 75, `form refreshed to 60–75 (got ${p.form} for ${p.name})`);
+      assert.ok(p.morale > 15 && p.morale <= 70, `morale pulled toward 70 (got ${p.morale} for ${p.name})`);
+      const t = tplById(p.id);
+      assert.ok(Math.abs(p.rating - t.rating) <= 1, `rating drift within ±1 (${p.name}: ${t.rating} -> ${p.rating})`);
+    }
+    const events = await reqOn(3231, '/api/worlds/w_roll/events', { cookie: c1 });
+    const prize = events.json.events.find(e => e.type === 'PRIZE_MONEY');
+    assert.ok(prize, 'PRIZE_MONEY event emitted');
+    assert.equal(prize.payload.awards[0].club, 'Chennai Super Kings');
+    assert.equal(prize.payload.awards[0].amount, 20);
+    assert.equal(prize.payload.awards[1].amount, 15);
+    assert.ok(events.json.events.some(e => e.type === 'NEW_SEASON' && e.payload.season === 2), 'NEW_SEASON event emitted');
+    const newsR = await reqOn(3231, '/api/worlds/w_roll/news', { cookie: c1 });
+    assert.ok(newsR.json.news.some(n => n.headline === 'Season 2 fixtures released'), 'fixtures-released news posted');
+
+    // --- world B: due fixtures simulate, then the season finishes ---
+    const finished = await pollUntil(async () => {
+      const w = await reqOn(3231, '/api/worlds/w_fin', { cookie: c1 });
+      return w.json.world.state === 'SEASON_FINISHED' ? w.json : null;
+    });
+    assert.ok(finished, 'world B should finish its season once every fixture is played');
+    assert.ok(finished.world.championMembershipId, 'a champion is recorded at the finish');
+    assert.equal(finished.world.lastSeasonStandings.length, 2);
+    const evB = await reqOn(3231, '/api/worlds/w_fin/events', { cookie: c1 });
+    const sc = evB.json.events.find(e => e.type === 'SEASON_COMPLETED');
+    assert.ok(sc && sc.payload.season === 1 && typeof sc.payload.champion === 'string' && sc.payload.champion.length > 0,
+      'SEASON_COMPLETED carries the champion club name');
+    const newsB = await reqOn(3231, '/api/worlds/w_fin/news', { cookie: c1 });
+    assert.ok(newsB.json.news.some(n => /^Season 1 complete — .+ are champions!$/.test(n.headline)), 'champions news posted');
+  } finally { srv.kill('SIGKILL'); fs.rmSync(dir, { recursive: true, force: true }); }
+});
