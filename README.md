@@ -9,6 +9,46 @@ Theme: a classic professional sports-manager look (boxed login, top header
 bar, dense tables) in the spirit of Soccer Manager's login page. All CSS and
 layout here are original; no third-party logos/assets are copied.
 
+## ▶ Play it live
+
+**https://cricket-manager-worlds.onrender.com**
+
+Register (email accounts confirm with a 6-digit OTP code) or sign in
+with Google, create a world, pick an IPL club, and start immediately —
+empty clubs are filled by AI managers, so the game is fully playable
+solo. Game state is stored permanently in Supabase, so worlds survive
+restarts and redeploys.
+
+Free-tier note: a keep-alive monitor pings the service every 5 minutes
+so it should stay awake; if it has just slept, the first visit can
+still take 30–60 seconds to wake.
+
+## Highlights
+
+- **Persistent worlds** — 24-hour auctions and auto-simulated matches run
+  on server time, even while every manager is offline
+- **Two ways to start** — Auction mode (empty squads, bid for players) or
+  Draft mode (squads of 20 distributed almost equally — measured spread
+  under 1% — then trade in the transfer market)
+- **AI managers** — fill empty clubs, bid in auctions, pick XIs/captains,
+  set tactics, and make/answer transfer offers; creators can start a
+  world at any time
+- **Detailed tactics** — per-player preferred batting position and bowling
+  phase, batting order, per-phase bowling plan, per-player approach, and
+  a home pitch choice (Batting / Balanced / Bowling); playing someone
+  against their preference costs morale and form in the match engine
+- **Transfer market** — manager-to-manager offers with cash fee, signing
+  bonus, player swap and captain/vice-captain promises; AI clubs trade too
+- **Real IPL data** — 10 original franchises and a 409-player pool with
+  real published names, roles and base prices; 95 players carry verified
+  real photos (Wikimedia Commons, credited), the rest use portrait art
+- **Auction depth** — player detail pages with full bid history,
+  undisclosed bids, and bid withdrawal even while leading
+- **Squad rules enforced server-side** — 18–25 players, with a budget
+  guard that reserves enough to complete a minimum squad
+- **Auth** — email/password with OTP email confirmation, plus real
+  Google sign-in (Supabase Auth); sessions survive refresh and restarts
+
 ## Quick start
 
 ```bash
@@ -92,7 +132,12 @@ works with no external configuration.
    state, start date, format, 🔒 if password-protected.
 3. **Create World** — name, description, number of clubs, format, match
    interval (default 3 days), match time, timezone, season length, auction /
-   season start times, optional password. The password is **bcrypt-hashed,
+   season start times, optional password, squad mode (auction or draft) and
+   **pace**: *Standard* (a match every 3 days, 24-hour auctions) or
+   *Fast (test)* — rounds every **10 minutes**, 10-minute auctions,
+   2-minute tactical locks and a season that starts ~2 minutes after the
+   creator starts a draft world, so a whole 10-club season (18 rounds)
+   plays out in about 3 hours. The password is **bcrypt-hashed,
    never stored or shown in plain text**; a wrong join password returns
    exactly `Incorrect world password.`
 4. **Join World** — view details → enter password if private → **choose an
@@ -118,7 +163,12 @@ works with no external configuration.
 7. **Squad / Tactics** — appoint Captain / Vice-Captain (leadership lifts
    the player's morale and adds a chemistry/performance modifier in the
    match engine), pick a Playing XI (max 11, only your own players) and
-   tactics. XI/tactics **lock 30 minutes before** your next fixture.
+   tactics. Every player has a set of **real-life batting positions**
+   they are happy to bat at (`batPositions`, ★ = favourite) plus
+   preferred bowling phases; the engine rewards using a player
+   anywhere inside their set and punishes positions outside it
+   (morale/form). XI/tactics **lock 30 minutes before** your next
+   fixture (2 minutes at fast pace).
 8. **Fixtures & Match Centre** — when a world's season start arrives, the
    scheduler generates a round-robin (home & away) fixture list; a club is
    never double-booked in a round. Matches auto-simulate at their scheduled
@@ -130,9 +180,19 @@ works with no external configuration.
 
 ### World state machine
 `CREATED → RECRUITING → AUCTION → SQUAD_BUILDING → PRE_SEASON →
-ACTIVE_SEASON → SEASON_FINISHED → OFF_SEASON → NEXT_SEASON`
-(transitions are time/state driven in the scheduler; the later states are
-declared in the model for the next-season rollover.)
+ACTIVE_SEASON → SEASON_FINISHED → (gap) → ACTIVE_SEASON (next season)`
+(transitions are time/state driven in the scheduler). When the last
+fixture of a season completes, the final standings and champion are
+recorded on the world (`lastSeasonStandings`, `championMembershipId`).
+After a gap — **3 days** at standard pace, **10 minutes** at fast
+pace — the world rolls over in one transition: **prize money** is paid
+by final position (₹20/15/12/10 Cr for 1st–4th, then ₹8/7/6/5/4/3 Cr),
+the league table resets, players refresh (form re-rolled to 60–75,
+morale pulled halfway back to 70, rating drifts −1/0/+1 as a capped
+`ratingDelta`), **squads and ownership carry over**, fresh fixtures
+are generated and season `seasonNumber + 1` begins. The event feed
+tells the story: `SEASON_COMPLETED` (with the champion),
+`PRIZE_MONEY`, `NEW_SEASON`.
 
 ### Scheduler
 `src/scheduler.js` runs on `setInterval` (server time is the only source of

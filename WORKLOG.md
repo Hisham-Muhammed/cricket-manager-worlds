@@ -546,3 +546,94 @@ First feedback from playing the live Render site, four features:
   built-in mailer is rate-limited — a custom SMTP (e.g. Resend) is
   the follow-up if real sign-up volume arrives. Not yet deployed:
   code + tests are local, pending push and the dashboard step.
+
+### 2026-10-14 — Fast pace mode, season rollover, real multi-position preferences
+Three related upgrades requested after play-testing ("match-day gap
+kurakkavo — 10 minutes something", "1 season kazhinj engne work
+aavunnu ennokke nokkamlo", "batting/bowling preference okke real
+life pole avanam; multiple position-il kalikunnindel athokke add
+aakkanam").
+
+- **Fast pace mode** (`pace: 'standard' | 'fast'` on world creation,
+  default standard — standard behaviour is byte-identical):
+  - Fast rounds are spaced **10 minutes** apart
+    (`matchIntervalMinutes`, default 10) from the season start, with
+    **2-minute** tactical locks (30 min standard); a 10-club fast
+    season is 18 rounds spanning 170 minutes — about **3 hours**
+    end to end (measured in the fixtures unit test).
+  - Fast auctions run **10 minutes** (`auctionEndsAt` accordingly,
+    relists too), so auction-mode fast worlds are testable; the AI
+    anti-snipe window shrinks to the final minute so AI managers
+    still bid in fast auctions.
+  - Creator start in fast mode: a **draft** world's season starts
+    **~2 minutes** later; an **auction** world's season starts after
+    the 10-minute auction + a 2-minute squad-building buffer
+    (12 minutes) — starting it at 2 minutes would generate fixtures
+    before any squads exist. Scheduled (non-creator) fast starts use
+    compressed creation defaults (auction +1 min, season per mode).
+  - Create form gained a Pace selector ("Standard — a match every
+    3 days" / "Fast (test) — a match every 10 minutes"); worlds
+    expose `pace` + `seasonNumber` (starts at 1) in payloads, with a
+    ⚡ Fast pill in the Lobby.
+
+- **Season rollover** — a season no longer just stops at
+  SEASON_FINISHED:
+  - `finishSeason()` (on the last fixture completing) snapshots the
+    final standings + champion onto the world
+    (`lastSeasonStandings`, `championMembershipId`), stamps
+    `seasonFinishedAt`, emits `SEASON_COMPLETED` (with the champion
+    club name) and posts the "Season N complete — X are champions!"
+    news.
+  - After a gap (**3 days** standard / **10 minutes** fast) the tick
+    runs `rolloverSeason()` in a single transition (state passes
+    briefly through OFF_SEASON): **prize money** by final position —
+    ₹20/15/12/10 Cr for 1st–4th, then ₹8/7/6/5/4/3 Cr (fewer clubs
+    take the table by position index) — league table reset, player
+    refresh (form re-rolled to a random **60–75**, morale pulled
+    halfway back to **70**, rating drifts **−1/0/+1** stored as a
+    per-worldPlayer `ratingDelta`, capped at ±3 so it persists and
+    feeds the match engine + squad/player payloads), **squads and
+    ownership retained**, AI re-picks XI/tactics, fresh fixtures,
+    `seasonNumber + 1`, state ACTIVE_SEASON. Emits `PRIZE_MONEY` and
+    `NEW_SEASON` + "Season N+1 fixtures released" news + member
+    notifications. Worlds that finished before this feature (no
+    snapshot) get their standings/champion rebuilt at rollover.
+
+- **Real-life multi-position preferences**:
+  - Every template now carries **`batPositions`** — the sorted set
+    of batting positions the player is happy at — alongside
+    `prefBatPos` (the ★ primary, always inside the set). The 44
+    original stars are hand-authored from real roles (Kohli [2,3],
+    Rahul [1,2,4], Pant [3,4,5], Dhoni [5,6,7], Hardik [4,5,6],
+    finishers [5,6,7], Narine [1,2,7,8] — pinch-opener who also
+    finishes, Rashid Khan [7,8]); the auction pool derives sets by
+    role + tier (BAT top [1,2]/[2,3], mid [3,4,5], lower [5,6];
+    WK top [1,2], others [4,5]; batting ARs [4,5,6], ARs [5,6,7];
+    bowlers [9,10,11], handy hitters [8,9,10]).
+  - Fit is now **set-based** (`computeFit`, exported for tests):
+    batting inside the set = happy (+2 morale); 1 position outside
+    the set's edge = mild misuse (−6 morale / −3 form, −3 rating);
+    2+ outside = severe (−12 / −6, −6 rating) — same magnitudes as
+    before. Bowling-phase judgement unchanged.
+  - Payloads carry `batPositions` (auction list, player page,
+    squad); the UI shows sets as "Bat 3–5 · ★ #4" (range for
+    contiguous sets, list otherwise) on the player page, squad
+    panel/table, and the tactics batting-order badges are set-based:
+    ✓ happy in-set, ⚠ 1 outside, ⚠⚠ 2+ outside.
+
+- Tests: suite extended 48 → **56 tests, all passing** (`npm test`,
+  `npm run check` clean; check now also syntax-checks fixtures.js
+  and players.js). New pins: star position sets + the
+  prefBatPos ∈ batPositions invariant for all 409 templates;
+  computeFit set semantics (in-set non-primary happy / 1-out mild /
+  far-out severe); fast vs standard fixture spacing + locks, incl.
+  the measured 10-club fast-season span (170 min); fast vs standard
+  auction durations; pace stored/exposed with standard fallback;
+  fast draft creator-start season ≈ 2 min; fast auction world opens
+  10-minute auctions with the season at auction + buffer; and a
+  seeded fast-tick integration test for rollover — a world finished
+  past its gap rolls to season 2 (champion + standings recorded,
+  prizes 50→70 / 50→65 paid, table reset, squads retained, form
+  60–75, morale pulled toward 70, drift ≤ ±1, PRIZE_MONEY /
+  NEW_SEASON events, fixtures-released news) while a second live
+  world plays out its due fixtures and finishes with a champion.
