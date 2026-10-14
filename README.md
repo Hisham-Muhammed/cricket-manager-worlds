@@ -43,13 +43,14 @@ hashes are never exposed in API responses.
 |---|---|
 | `PORT` | Server port (default `3000`) |
 | `SESSION_SECRET` | Signs session JWTs and guards `POST /api/admin/tick`. Use a long random string in production. |
+| `PUBLIC_URL` | Public origin of the deployed site (scheme + host, no trailing slash) — used to build every externally-facing URL (Supabase OAuth `redirect_to`, the default Google callback) so they are https in production. Production value: `https://cricket-manager-worlds.onrender.com`. When unset, the origin is derived from the request (honouring `X-Forwarded-Proto` behind the host's TLS proxy). |
 | `DATABASE_MODE` | `supabase` for production, `local` for the dev-only JSON fallback |
 | `SUPABASE_URL` | Your Supabase project URL, e.g. `https://<project-ref>.supabase.co` |
 | `SUPABASE_ANON_KEY` | Public/anon key — the only Supabase key a browser may see; limited by RLS |
 | `SUPABASE_SERVICE_ROLE_KEY` | **Secret**, server only — bypasses RLS; used by the API/scheduler after server-side validation. Never commit a real value or put it in frontend code |
 | `DATABASE` | Local-dev fallback only: path to the JSON DB file (default `./data/db.json`) |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Local-mode Google OAuth only — in supabase mode the credentials live in the Supabase provider settings (see below) |
-| `GOOGLE_CALLBACK_URL` | e.g. `http://localhost:3000/api/auth/google/callback` |
+| `GOOGLE_CALLBACK_URL` | e.g. `http://localhost:3000/api/auth/google/callback`. Optional when `PUBLIC_URL` is set — defaults to `<PUBLIC_URL>/api/auth/google/callback` |
 | `SCHEDULER_INTERVAL_MS` | Scheduler tick interval (default `10000`) |
 
 ### Google sign-in
@@ -60,7 +61,9 @@ fake-logs anyone in:
 Supabase Auth (Dashboard → Authentication → Providers → Google, with
 the OAuth client's ID + secret stored there — not in this repo's
 `.env`). "Sign in with Google" sends the browser to Supabase's
-authorize URL; Google redirects back to the site root, the frontend
+authorize URL (its `redirect_to` is the site root, built from
+`PUBLIC_URL` — set it in production so the redirect stays on https);
+Google redirects back to the site root, the frontend
 hands the access token to `POST /api/auth/google/session`, and the
 server verifies it against Supabase Auth and links/creates the manager
 profile in `public.managers` (`auth_user_id`). In the Google Cloud

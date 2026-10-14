@@ -22,6 +22,7 @@ const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const vm = require('node:vm');
 
 const PORT = 3217;
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -70,12 +71,13 @@ after(() => {
   if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-async function req(pathname, { method = 'GET', body, cookie } = {}) {
+async function req(pathname, { method = 'GET', body, cookie, headers } = {}) {
   const res = await fetch(BASE + pathname, {
     method,
     headers: {
       ...(body ? { 'Content-Type': 'application/json' } : {}),
       ...(cookie ? { Cookie: cookie } : {}),
+      ...(headers || {}),
     },
     body: body ? JSON.stringify(body) : undefined,
   });
@@ -83,7 +85,7 @@ async function req(pathname, { method = 'GET', body, cookie } = {}) {
   try { json = await res.json(); } catch { /* non-JSON response */ }
   const setCookies = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
   const tokenCookie = setCookies.find(c => c.startsWith('token='));
-  return { status: res.status, json, cookie: tokenCookie ? tokenCookie.split(';')[0] : null };
+  return { status: res.status, json, cookie: tokenCookie ? tokenCookie.split(';')[0] : null, setCookies };
 }
 
 const MANAGER_A = { name: 'Asha Manager', email: 'asha@example.com', password: 'secret1' };
@@ -358,4 +360,208 @@ test('the squad cap rejects a bid that would take a manager past 25 leading play
   });
   assert.equal(overflow.status, 400);
   assert.equal(overflow.json.error, 'Squad is full (max 25 players).');
+});
+
+// ---------- real player photos (Wikimedia Commons manifest) ----------
+
+test('manifest players return a real Commons photoUrl; non-manifest players return photoUrl null', async () => {
+  const auction = await req(`/api/worlds/${world2Id}/auction`, { cookie: cookieC });
+  assert.equal(auction.status, 200);
+
+  const kohli = auction.json.auctions.find(a => a.player.name === 'Virat Kohli');
+  assert.ok(kohli, 'Virat Kohli should be in the pool');
+  assert.ok(kohli.player.photoUrl && kohli.player.photoUrl.includes('upload.wikimedia.org'),
+    'Kohli should carry a real Wikimedia Commons photo URL');
+  assert.ok(kohli.player.photoCredit, 'the photo credit should be present');
+  assert.ok(kohli.player.photoPage && kohli.player.photoPage.includes('commons.wikimedia.org'),
+    'the Commons file page should be present');
+
+  const detail = await req(`/api/worlds/${world2Id}/players/${kohli.worldPlayerId}`, { cookie: cookieC });
+  assert.equal(detail.status, 200);
+  assert.ok(detail.json.player.photoUrl.includes('upload.wikimedia.org'),
+    'the player detail response should carry the same photoUrl');
+
+  const klaasen = auction.json.auctions.find(a => a.player.name === 'Heinrich Klaasen');
+  assert.ok(klaasen, 'Heinrich Klaasen should be in the pool');
+  assert.equal(klaasen.player.photoUrl, null, 'a player with no freely licensed Commons photo returns photoUrl null');
+});
+
+// ---------- bug-fix regressions (2026-10-14) ----------
+
+const adminTick = () => req('/api/admin/tick', { method: 'POST', headers: { 'x-admin-key': 'test-secret' } });
+
+test('bug 1: the AI defends its star after a human outbids it with an UNDISCLOSED bid', async () => {
+  // Regression: the AI used to open ~2 new fronts per tick with no
+  // commitment cap until its whole ₹100 Cr was committed (≈₹99.95 Cr
+  // across ~18-20 star leads), after which validateBid rejected every
+  // further bid and it could never respond on a contested auction
+  // again — the user hit it right after placing an undisclosed bid.
+  const { cookie, worldId: wid } = await startedWorld(
+    { name: 'Gita Tick', email: 'gita@example.com', password: 'secret7' }, 'Tick');
+  // Let the AI accumulate leads over several ticks first (the state in
+  // which the freeze used to happen).
+  for (let i = 0; i < 8; i++) assert.equal((await adminTick()).status, 200);
+
+  const list = await req(`/api/worlds/${wid}/auction`, { cookie });
+  const star = [...list.json.auctions].sort((a, b) => b.player.rating - a.player.rating)[0];
+  assert.equal(star.player.name, 'Jasprit Bumrah');
+  const before = await req(`/api/worlds/${wid}/players/${star.worldPlayerId}`, { cookie });
+  assert.equal(before.json.auction.highestBidderClub, 'Mumbai Indians', 'the AI should be leading its top target');
+  const price = before.json.auction.currentPrice;
+
+  const humanBid = await req(`/api/auctions/${star.auctionId}/bid`, {
+    method: 'POST', cookie, body: { amount: +(price + 1).toFixed(2), undisclosed: true },
+  });
+  assert.equal(humanBid.status, 201);
+
+  for (let i = 0; i < 2; i++) assert.equal((await adminTick()).status, 200);
+
+  const after = await req(`/api/worlds/${wid}/players/${star.worldPlayerId}`, { cookie });
+  const aiCounter = after.json.bids.find(b => b.clubName === 'Mumbai Indians' && b.amount > price + 1);
+  assert.ok(aiCounter, 'the AI must counter-bid on the auction after the undisclosed outbid');
+  assert.equal(after.json.auction.currentPrice, aiCounter.amount);
+  assert.equal(after.json.auction.highestBidderClub, 'Mumbai Indians');
+});
+
+test('bug 3 (server): the session cookie is long-lived — Max-Age 30 days, Path=/, HttpOnly', async () => {
+  const r = await req('/api/auth/login', {
+    method: 'POST', body: { email: MANAGER_A.email, password: MANAGER_A.password },
+  });
+  assert.equal(r.status, 200);
+  const raw = r.setCookies.find(c => c.startsWith('token='));
+  assert.ok(raw, 'login should set the token cookie');
+  assert.match(raw, /Max-Age=2592000/, 'cookie must live 30 days, not just the browser session');
+  assert.match(raw, /Path=\//);
+  assert.match(raw, /HttpOnly/);
+  assert.match(raw, /SameSite=Lax/i);
+});
+
+// Spawn a throwaway extra server (own DB file) for env-specific tests.
+async function spawnExtraServer(port, env) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cmw-extra-'));
+  const srv = spawn(process.execPath, ['src/server.js'], {
+    cwd: ROOT,
+    env: { ...process.env, PORT: String(port), DATABASE: path.join(dir, 'db.json'),
+      SESSION_SECRET: 'test-secret', SCHEDULER_INTERVAL_MS: '3600000', ...env },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let log = '';
+  srv.stdout.on('data', d => { log += d; });
+  srv.stderr.on('data', d => { log += d; });
+  const deadline = Date.now() + 20000;
+  while (Date.now() < deadline) {
+    try { const r = await fetch(`http://127.0.0.1:${port}/api/server-time`); if (r.ok) return { srv, dir }; }
+    catch { /* not up yet */ }
+    await new Promise(r => setTimeout(r, 250));
+  }
+  srv.kill('SIGKILL');
+  throw new Error('extra server did not start:\n' + log);
+}
+
+test('bug 2: local-mode Google redirect_uri is built from PUBLIC_URL (https) when GOOGLE_CALLBACK_URL is unset', async () => {
+  const { srv, dir } = await spawnExtraServer(3221, {
+    DATABASE_MODE: 'local', SUPABASE_URL: '', SUPABASE_ANON_KEY: '', SUPABASE_SERVICE_ROLE_KEY: '',
+    GOOGLE_CLIENT_ID: 'test-client-id', GOOGLE_CLIENT_SECRET: 'test-client-secret',
+    GOOGLE_CALLBACK_URL: '', PUBLIC_URL: 'https://game.example.test',
+  });
+  try {
+    const res = await fetch('http://127.0.0.1:3221/api/auth/google', { redirect: 'manual' });
+    assert.equal(res.status, 302);
+    const loc = res.headers.get('location');
+    assert.ok(loc.startsWith('https://accounts.google.com/'), 'should redirect to Google');
+    assert.ok(decodeURIComponent(loc).includes('redirect_uri=https://game.example.test/api/auth/google/callback'),
+      `redirect_uri should be the PUBLIC_URL callback, got: ${loc}`);
+  } finally { srv.kill('SIGKILL'); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('bug 2: supabase-mode Google redirect_to uses PUBLIC_URL (https), not the http request origin', async () => {
+  // Dummy Supabase URL on a dead local port: auth construction needs
+  // no network, db.init() falls back to the local file by design.
+  const { srv, dir } = await spawnExtraServer(3222, {
+    DATABASE_MODE: 'supabase', SUPABASE_URL: 'http://127.0.0.1:9',
+    SUPABASE_ANON_KEY: 'dummy-anon', SUPABASE_SERVICE_ROLE_KEY: 'dummy-service',
+    PUBLIC_URL: 'https://cricket-manager-worlds.onrender.com',
+  });
+  try {
+    const res = await fetch('http://127.0.0.1:3222/api/auth/google', { redirect: 'manual' });
+    assert.equal(res.status, 302);
+    const loc = res.headers.get('location');
+    assert.ok(loc.includes('/auth/v1/authorize?provider=google'), `should redirect to Supabase authorize, got: ${loc}`);
+    assert.ok(loc.includes('redirect_to=https%3A%2F%2Fcricket-manager-worlds.onrender.com%2F'),
+      `redirect_to must be the https PUBLIC_URL root, got: ${loc}`);
+    assert.ok(!loc.includes('redirect_to=http%3A'), 'redirect_to must not be http');
+  } finally { srv.kill('SIGKILL'); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('bug 2: without PUBLIC_URL, the request origin honours X-Forwarded-Proto behind a proxy', async () => {
+  const { srv, dir } = await spawnExtraServer(3223, {
+    DATABASE_MODE: 'supabase', SUPABASE_URL: 'http://127.0.0.1:9',
+    SUPABASE_ANON_KEY: 'dummy-anon', SUPABASE_SERVICE_ROLE_KEY: 'dummy-service',
+    PUBLIC_URL: '',
+  });
+  try {
+    const res = await fetch('http://127.0.0.1:3223/api/auth/google', {
+      redirect: 'manual', headers: { 'x-forwarded-proto': 'https' },
+    });
+    assert.equal(res.status, 302);
+    const loc = res.headers.get('location');
+    assert.ok(decodeURIComponent(loc).includes('redirect_to=https://127.0.0.1:3223/'),
+      `redirect_to should be https via the forwarded proto, got: ${loc}`);
+  } finally { srv.kill('SIGKILL'); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('bug 3 (SPA): nav persistence helpers round-trip the saved view/world/player and survive corrupt data', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf8');
+  const start = src.indexOf('// [nav-persistence:start]');
+  const end = src.indexOf('// [nav-persistence:end]');
+  assert.ok(start >= 0 && end > start, 'the nav-persistence block should exist in app.js');
+  const block = src.slice(start, end);
+  const store = new Map();
+  const sandbox = {
+    localStorage: {
+      getItem: k => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => store.set(k, String(v)),
+      removeItem: k => store.delete(k),
+    },
+    tab: 'Player', worldId: 'world_abc', playerPid: 'wp_123', backTab: 'Auction', focusPid: 'wp_123',
+  };
+  vm.runInNewContext(`${block}\nthis.__nav = { saveNav, loadNav, clearNav };`, sandbox);
+  sandbox.__nav.saveNav();
+  // JSON round-trip: the vm realm's objects fail strict prototype checks.
+  assert.deepEqual(JSON.parse(JSON.stringify(sandbox.__nav.loadNav())),
+    { tab: 'Player', worldId: 'world_abc', playerPid: 'wp_123', backTab: 'Auction', focusPid: 'wp_123' },
+    'a refresh should restore the same screen, world and player page');
+  store.set('cmw.nav.v1', '{corrupt json');
+  assert.equal(sandbox.__nav.loadNav(), null, 'corrupt saved state must fall back to null (-> Lobby)');
+  sandbox.__nav.saveNav();
+  sandbox.__nav.clearNav();
+  assert.equal(sandbox.__nav.loadNav(), null, 'logout clears the saved view');
+});
+
+test('bug 3 (server): a session cookie stays valid across a server restart (stateless JWT)', async () => {
+  // A second instance over the SAME database file + session secret —
+  // the "restart" — must accept the cookie issued by the first.
+  const { srv, dir } = await (async () => {
+    const s = spawn(process.execPath, ['src/server.js'], {
+      cwd: ROOT,
+      env: { ...process.env, PORT: '3219', DATABASE: path.join(tmpDir, 'db.json'),
+        DATABASE_MODE: 'local', SESSION_SECRET: 'test-secret',
+        SUPABASE_URL: '', SUPABASE_ANON_KEY: '', SUPABASE_SERVICE_ROLE_KEY: '',
+        SCHEDULER_INTERVAL_MS: '3600000' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const deadline = Date.now() + 20000;
+    for (;;) {
+      try { const r = await fetch('http://127.0.0.1:3219/api/server-time'); if (r.ok) break; } catch { /* not up yet */ }
+      if (Date.now() > deadline) { s.kill('SIGKILL'); throw new Error('restart instance did not start'); }
+      await new Promise(r => setTimeout(r, 250));
+    }
+    return { srv: s, dir: null };
+  })();
+  try {
+    const r = await fetch('http://127.0.0.1:3219/api/auth/me', { headers: { Cookie: cookieA } });
+    assert.equal(r.status, 200);
+    const j = await r.json();
+    assert.equal(j.user.email, MANAGER_A.email);
+  } finally { srv.kill('SIGKILL'); if (dir) fs.rmSync(dir, { recursive: true, force: true }); }
 });

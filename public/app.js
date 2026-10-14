@@ -26,15 +26,39 @@ function photoCreditHTML(p){if(!p||!p.photoUrl)return '';
  const inner=`Photo: ${esc(p.photoCredit||'Wikimedia Commons')}${p.photoLicense?' · '+esc(p.photoLicense):''}`;
  return `<div class="photocredit">${p.photoPage?`<a href="${esc(p.photoPage)}" target="_blank" rel="noopener">${inner}</a>`:inner}</div>`;}
 
+// ---- nav persistence: refresh/reopen returns to the same screen ----
+// The session itself is a 30-day JWT cookie (see COOKIE_OPTS in
+// src/server.js), so a refresh keeps the user signed in; this block
+// remembers WHERE they were (tab + world + player page) in
+// localStorage so boot() can put them back instead of always landing
+// on the Lobby. Keep this block self-contained (localStorage + the
+// navigation globals only): test/api.test.js extracts and exercises it.
+// [nav-persistence:start]
+const NAV_KEY='cmw.nav.v1';
+function saveNav(){try{localStorage.setItem(NAV_KEY,JSON.stringify({tab,worldId,playerPid,backTab,focusPid}));}catch{}}
+function loadNav(){try{const s=JSON.parse(localStorage.getItem(NAV_KEY)||'null');return (s&&typeof s==='object'&&!Array.isArray(s))?s:null;}catch{return null;}}
+function clearNav(){try{localStorage.removeItem(NAV_KEY);}catch{}}
+// [nav-persistence:end]
+// Restore the saved view after the session check. Anything stale —
+// the world was deleted, the player is gone — falls back gracefully:
+// player page -> its back tab, world view -> Lobby.
+async function restoreNav(){const nav=loadNav();if(!nav||!nav.worldId)return;
+ try{await api('/api/worlds/'+nav.worldId);}catch{return;}
+ worldId=nav.worldId;backTab=nav.backTab||'Auction';focusPid=nav.focusPid||null;
+ if(nav.tab==='Player'&&nav.playerPid){
+  try{await api(`/api/worlds/${worldId}/players/${nav.playerPid}`);playerPid=nav.playerPid;tab='Player';}
+  catch{tab=(backTab&&backTab!=='Player')?backTab:'Auction';}
+ }else if(nav.tab&&nav.tab!=='Lobby'){tab=nav.tab;}}
+
 // ---- auth ----
-async function boot(){if(location.hash.includes('access_token=')){const h=new URLSearchParams(location.hash.slice(1));try{await api('/api/auth/google/session',{method:'POST',body:JSON.stringify({accessToken:h.get('access_token')})});}catch{}history.replaceState(null,'',location.pathname+location.search);}try{const d=await api('/api/auth/me');me=d.user;showApp();}catch{$('#authView').classList.remove('hidden');}}
+async function boot(){if(location.hash.includes('access_token=')){const h=new URLSearchParams(location.hash.slice(1));try{await api('/api/auth/google/session',{method:'POST',body:JSON.stringify({accessToken:h.get('access_token')})});}catch{}history.replaceState(null,'',location.pathname+location.search);}try{const d=await api('/api/auth/me');me=d.user;await restoreNav();showApp();}catch{$('#authView').classList.remove('hidden');}}
 function authMode(reg){$('#tabSignIn').classList.toggle('on',!reg);$('#tabRegister').classList.toggle('on',reg);$('#loginBtn').classList.toggle('hidden',reg);$('#regBtn').classList.toggle('hidden',!reg);$('#mnameRow').classList.toggle('hidden',!reg);}
 $('#tabSignIn').onclick=()=>authMode(false);
 $('#tabRegister').onclick=()=>authMode(true);
 $('#loginBtn').onclick=async()=>{try{const d=await api('/api/auth/login',{method:'POST',body:JSON.stringify({email:$('#email').value,password:$('#password').value})});me=d.user;showApp();}catch(e){$('#authErr').textContent=e.message;}};
 $('#regBtn').onclick=async()=>{try{const d=await api('/api/auth/register',{method:'POST',body:JSON.stringify({name:$('#mname').value,email:$('#email').value,password:$('#password').value})});me=d.user;showApp();}catch(e){$('#authErr').textContent=e.message;}};
 function showApp(){$('#authView').classList.add('hidden');$('#appView').classList.remove('hidden');$('#who').innerHTML=`<span class="mgr-ava">${esc(initials(me.name))}</span><span><span class="mgr-name">${esc(me.name)}</span> <span class="mgr-email">(${esc(me.email)})</span></span> <button class="secondary" onclick="logout()">Logout</button>`;renderTabs();render();}
-window.logout=async()=>{await api('/api/auth/logout',{method:'POST'});location.reload();};
+window.logout=async()=>{clearNav();await api('/api/auth/logout',{method:'POST'});location.reload();};
 
 // ---- sidebar menu: sections + SVG icons, active state, club header block ----
 const IC={
@@ -99,7 +123,7 @@ function squadPanelHTML(p,d){const inXI=d.xi.includes(p.worldPlayerId);
  <button class="secondary" onclick="cap('${p.worldPlayerId}','vice')">Vice-captain</button>
  <button onclick="openPlayer('${p.worldPlayerId}','Squad')">Player page →</button></div>`;}
 
-async function render(){const v=$('#view');$('#err').textContent='';refreshClubBlock();
+async function render(){saveNav();const v=$('#view');$('#err').textContent='';refreshClubBlock();
  try{
   if(tab==='Lobby'){const d=await api('/api/worlds');
    v.innerHTML=`<div class="panel"><h2>Game World Lobby</h2><div class="tblwrap"><table><tr><th>World</th><th>Creator</th><th>Managers</th><th>Status</th><th>Start</th><th>Format</th><th></th></tr>

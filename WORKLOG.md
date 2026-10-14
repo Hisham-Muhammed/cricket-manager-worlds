@@ -246,3 +246,70 @@ First feedback from playing the live Render site, four features:
 - Tests: 19/19 — new test pins Kohli's photoUrl (upload.wikimedia.org)
   in the auction list + player detail, and photoUrl null for a
   non-manifest player (Klaasen).
+
+### 2026-10-14 — Three live bug fixes: AI freeze after undisclosed bids, Google redirect http, refresh logout
+- **Bug 1 — AI stops bidding after an undisclosed bid (root cause
+  found by reproduction, and it was NOT the masking).** The AI tick
+  path (`scheduler.aiTakeTurn` → `src/bids.js`) reads raw `db.bids`
+  throughout (`topBid`/`validBids`/`leadingList`); `bidView`/
+  `auctionView` masking lives only in HTTP serialization in
+  server.js and never feeds server logic — proven by repro: on a
+  fresh world the AI happily counter-bids undisclosed bids. The real
+  mechanism was economic: the AI opened up to 2 new fronts per tick,
+  highest-rated first, with no cap on total commitments. Within ~10
+  ticks it led ~18 star-heavy auctions totalling ₹99.95 Cr of its
+  ₹100 Cr (measured in a live-style repro), after which the shared
+  `validateBid()` budget guard rejected every further bid
+  ("Insufficient transfer funds." — re-contesting a ₹15 Cr star
+  needed ₹16.8 Cr while its other leads still committed ≈₹85 Cr)
+  and the squad-target count (20) was saturated too. The AI was
+  frozen for the rest of the auction; when the user outbid it on a
+  star — with an undisclosed bid, the case reported, though
+  disclosed bids froze identically — it could never respond, and no
+  other AI reached that auction (fixed per-AI scan offsets, 2-bid
+  quota spent earlier). Fix (`src/scheduler.js`): each AI's
+  candidate order is now defend-first (auctions where it holds a
+  live bid but no longer leads, before new fronts), and it only
+  opens a NEW front while its live commitments are under a
+  war-chest ceiling (`AI_WARCHEST_FRACTION = 0.6` of budget), so it
+  always keeps headroom to defend its targets; `validateBid()` still
+  guards every bid. Verified: the repro's phases B/C went from 0 AI
+  counter-bids to immediate counter-bids (₹16.8 / ₹12.81), and a new
+  suite regression test saturates an AI via admin ticks, outbids its
+  star with an undisclosed bid, and asserts the AI counter-bids.
+- **Bug 2 — Google sign-in redirected to http://.** In supabase
+  mode, `/api/auth/google` built `redirect_to` from `req.protocol`,
+  which is `http` behind Render's TLS-terminating proxy. Fix:
+  `PUBLIC_URL` env var now feeds `publicOrigin()` — every
+  externally-facing URL the server builds uses it when set (the
+  Supabase `redirect_to` and the local-mode Google callback
+  default); when unset, the origin comes from the request with
+  `app.set('trust proxy', true)` so `X-Forwarded-Proto` keeps it
+  https behind proxies. `GOOGLE_CALLBACK_URL` still overrides in
+  local mode. Documented in `.env.example`, the README env table +
+  Google section, and `render.yaml` (production value
+  `https://cricket-manager-worlds.onrender.com`). Tests spawn real
+  servers in both modes and pin the 302 Locations, plus the
+  forwarded-proto fallback.
+- **Bug 3 — refresh logged the user out / lost their place.** Two
+  layers. Server: the JWT was already stateless/30-day, but the
+  cookie attributes were implicit — all six cookie-setting sites now
+  share `COOKIE_OPTS` (`httpOnly`, `SameSite=Lax`, explicit
+  `Path=/`, `Max-Age` 30 days) and logout clears with the matching
+  path, so the session provably survives restarts in both modes (a
+  suite test presents a cookie to a second instance over the same
+  DB and gets 200 from `/api/auth/me`). SPA (`public/app.js`): the
+  current tab + world id + player page are persisted to
+  localStorage on every render (`saveNav`/`loadNav`/`clearNav`,
+  key `cmw.nav.v1`); on boot, after the `/api/auth/me` session
+  restore, `restoreNav()` re-validates the saved world (and player)
+  over the API and returns the user to the same screen — falling
+  back player → back tab → Lobby when anything is stale; logout
+  clears the saved view. The persistence helpers are exercised
+  directly by a suite test (round-trip + corrupt-data fallback).
+- Tests: suite extended 19 → **26 tests, all passing** (`npm test`),
+  `npm run check` clean. Boot smoke (local mode, PUBLIC_URL set):
+  register sets `Max-Age=2592000; Path=/; HttpOnly; SameSite=Lax`,
+  the Google 302 carries the https PUBLIC_URL callback, and after a
+  full process restart the same cookie passes `/api/auth/me` and the
+  world-restore fetch — the exact calls `boot()`/`restoreNav()` make.
