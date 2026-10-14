@@ -402,9 +402,31 @@ module.exports = [
   ["Saransh Jain",null,"All-Rounder","India",67,0.3],
   ["Sooraj Sangaraju",null,"All-Rounder","India",64,0.3],
   ["Tanmay Agarwal",null,"Batsman","India",64,0.3],
-].map(([name,age,role,nationality,rating,baseValue], i) => ({
-  id: 'player_' + (i + 1), name, age, role, nationality, rating, baseValue,
-  batting: Math.min(99, rating + (role === 'Batsman' || role === 'Wicket-Keeper' ? 3 : role === 'All-Rounder' ? 0 : -18)),
-  bowling: Math.min(99, rating + (role === 'Bowler' ? 3 : role === 'All-Rounder' ? 0 : -20)),
-  leadership: Math.max(40, rating - (['Virat Kohli','Rohit Sharma','MS Dhoni','Pat Cummins','Kane Williamson','Jos Buttler'].includes(name) ? -8 : 18)),
-}));
+].map(([name,age,role,nationality,rating,baseValue], i) => {
+  const batting = Math.min(99, rating + (role === 'Batsman' || role === 'Wicket-Keeper' ? 3 : role === 'All-Rounder' ? 0 : -18));
+  const bowling = Math.min(99, rating + (role === 'Bowler' ? 3 : role === 'All-Rounder' ? 0 : -20));
+  const leadership = Math.max(40, rating - (['Virat Kohli','Rohit Sharma','MS Dhoni','Pat Cummins','Kane Williamson','Jos Buttler'].includes(name) ? -8 : 18));
+  // ---- Player preferences (derived, deterministic per player) ----
+  // prefBatPos: where the player likes to bat (1-11). prefOvers: the
+  // phases a bowler likes to bowl in ('powerplay' 1-6, 'middle' 7-15,
+  // 'death' 16-20). approach: their default batting approach. The
+  // match engine rewards using players the way they prefer and
+  // punishes misuse (morale/form), see src/matchEngine.js.
+  const h = [...name].reduce((s, c) => s + c.charCodeAt(0), 0);
+  const pick = arr => arr[h % arr.length];
+  let prefBatPos;
+  if (role === 'Bowler') prefBatPos = pick([9, 10, 11]);
+  else if (role === 'Batsman') prefBatPos = batting >= 90 ? pick([1, 2, 3]) : batting >= 84 ? pick([2, 3, 4]) : batting >= 78 ? pick([4, 5, 6]) : batting >= 70 ? pick([5, 6, 7]) : pick([7, 8, 9]);
+  else if (role === 'Wicket-Keeper') prefBatPos = batting >= 88 ? pick([1, 2, 3]) : batting >= 80 ? pick([3, 4, 5]) : batting >= 72 ? pick([5, 6, 7]) : pick([7, 8]);
+  else prefBatPos = batting >= 86 ? pick([3, 4, 5]) : batting >= 78 ? pick([5, 6]) : batting >= 70 ? pick([6, 7]) : pick([7, 8, 9]); // All-Rounder
+  let prefOvers = [];
+  if (role === 'Bowler' || role === 'All-Rounder') {
+    if (bowling >= 90) prefOvers = ['powerplay', 'death'];       // strike bowlers open and close
+    else if (bowling >= 84) prefOvers = pick([['powerplay', 'middle'], ['middle', 'death']]);
+    else if (bowling >= 76) prefOvers = pick([['middle'], ['powerplay', 'middle'], ['middle', 'death']]);
+    else prefOvers = ['middle'];
+  }
+  const approach = batting >= 88 ? 'aggressive' : batting >= 76 ? 'balanced' : 'defensive';
+  return { id: 'player_' + (i + 1), name, age, role, nationality, rating, baseValue,
+    batting, bowling, leadership, prefBatPos, prefOvers, approach };
+});
