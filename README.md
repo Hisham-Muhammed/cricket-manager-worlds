@@ -48,17 +48,37 @@ hashes are never exposed in API responses.
 | `SUPABASE_ANON_KEY` | Public/anon key — the only Supabase key a browser may see; limited by RLS |
 | `SUPABASE_SERVICE_ROLE_KEY` | **Secret**, server only — bypasses RLS; used by the API/scheduler after server-side validation. Never commit a real value or put it in frontend code |
 | `DATABASE` | Local-dev fallback only: path to the JSON DB file (default `./data/db.json`) |
-| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Google OAuth credentials (see below) |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Local-mode Google OAuth only — in supabase mode the credentials live in the Supabase provider settings (see below) |
 | `GOOGLE_CALLBACK_URL` | e.g. `http://localhost:3000/api/auth/google/callback` |
 | `SCHEDULER_INTERVAL_MS` | Scheduler tick interval (default `10000`) |
 
 ### Google sign-in
-Create an OAuth client at <https://console.cloud.google.com/apis/credentials>,
-add the callback URL above as an authorised redirect URI, and put the values
-in `.env`. Until then the Google button returns a clear
-"Google OAuth needs configuration" message — it never fake-logs anyone in.
-Email register/login (bcrypt-hashed passwords, `bcryptjs`, cost 12) works
-with no external configuration.
+Two real implementations, selected by `DATABASE_MODE` — neither ever
+fake-logs anyone in:
+
+**Supabase mode (production).** Google is enabled as a provider in
+Supabase Auth (Dashboard → Authentication → Providers → Google, with
+the OAuth client's ID + secret stored there — not in this repo's
+`.env`). "Sign in with Google" sends the browser to Supabase's
+authorize URL; Google redirects back to the site root, the frontend
+hands the access token to `POST /api/auth/google/session`, and the
+server verifies it against Supabase Auth and links/creates the manager
+profile in `public.managers` (`auth_user_id`). In the Google Cloud
+Console the OAuth client needs the Supabase callback
+`https://<project-ref>.supabase.co/auth/v1/callback` as an authorised
+redirect URI, and the consent screen published (this project's setup
+was completed and verified on 2026-10-13).
+
+**Local mode (dev).** Set `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`
+/ `GOOGLE_CALLBACK_URL` in `.env` (create the client at
+<https://console.cloud.google.com/apis/credentials>, authorised
+redirect URI `http://localhost:3000/api/auth/google/callback`). The
+server runs the standard OAuth code exchange itself. Without those
+values the Google button returns a clear "Google OAuth needs
+configuration" message.
+
+Email register/login (bcrypt-hashed passwords, `bcryptjs`, cost 12)
+works with no external configuration.
 
 ## How the game works
 

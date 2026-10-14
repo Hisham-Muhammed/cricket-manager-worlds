@@ -104,3 +104,18 @@ actually done and reviewed, in the order it happened.
   carry age NULL: schema.sql now allows it, seed.sql documents the
   one-line ALTER for existing projects, and the UI shows '—'.
 - seed.sql regenerated from players.js (409 rows).
+
+### 2026-10-14 — Google sign-in in this codebase: documented + redirect legs verified
+- Confirmed both real Google flows are in the code and documented
+  them properly in the README (the old text only covered local
+  mode): supabase mode goes through the Supabase Auth Google provider
+  (enabled 2026-10-13) with the token verified at
+  `POST /api/auth/google/session`; local mode runs the standard
+  OAuth code exchange with `GOOGLE_*` env values.
+- Live boot tests (placeholder keys, real URLs): local mode returns
+  302 to accounts.google.com with the correct client_id and
+  `/api/auth/google/callback` redirect URI; supabase mode returns
+  302 to the project's `/auth/v1/authorize?provider=google`. The
+  final leg (a real Google account completing sign-in) needs the
+  server running with the project's real keys — deployment-time
+  verification, like the rest of supabase mode.
