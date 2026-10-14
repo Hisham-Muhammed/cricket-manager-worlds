@@ -27,7 +27,12 @@ function pAvatar(a){return avatarHTML({...a.player,worldPlayerId:a.worldPlayerId
 const PHASE_LABEL={powerplay:'Powerplay (1–6)',middle:'Middle (7–15)',death:'Death (16–20)'};
 function phaseLabel(n){return PHASE_LABEL[n]||n;}
 function cap1(s){return s?s[0].toUpperCase()+s.slice(1):s;}
-function prefShort(p){if(!p)return '';const o=(p.prefOvers&&p.prefOvers.length)?' · '+p.prefOvers.map(n=>({powerplay:'PP',middle:'Mid',death:'Death'}[n]||n)).join('/') :'';return `Pref #${p.prefBatPos ?? '—'}${o}`;}
+// A player's happy batting positions as a compact label: a
+// contiguous set renders as a range ("3–5"), anything else as a
+// list ("1,2,7,8"); the ★ primary is prefBatPos itself.
+function batSetLabel(p){const s=(p&&p.batPositions)||[];if(!s.length)return (p&&p.prefBatPos)?String(p.prefBatPos):'—';
+ return (s.length>1&&s[s.length-1]-s[0]===s.length-1)?`${s[0]}–${s[s.length-1]}`:s.join(',');}
+function prefShort(p){if(!p)return '';const o=(p.prefOvers&&p.prefOvers.length)?' · '+p.prefOvers.map(n=>({powerplay:'PP',middle:'Mid',death:'Death'}[n]||n)).join('/') :'';return `Bat ${batSetLabel(p)} (★${p.prefBatPos ?? '—'})${o}`;}
 // Attribution for real Wikimedia Commons photos (detail page only).
 function photoCreditHTML(p){if(!p||!p.photoUrl)return '';
  const inner=`Photo: ${esc(p.photoCredit||'Wikimedia Commons')}${p.photoLicense?' · '+esc(p.photoLicense):''}`;
@@ -134,7 +139,7 @@ function squadPanelHTML(p,d){const inXI=d.xi.includes(p.worldPlayerId);
  <div class="kv"><span>Batting</span><b>${p.batting}</b></div>
  <div class="kv"><span>Bowling</span><b>${p.bowling}</b></div>
  <div class="kv"><span>Leadership</span><b>${p.leadership}</b></div>
- <div class="kv"><span>Prefers to bat</span><b>#${p.prefBatPos ?? '—'}</b></div>
+ <div class="kv"><span>Prefers to bat</span><b>Bat ${batSetLabel(p)} · ★ #${p.prefBatPos ?? '—'}</b></div>
  <div class="kv"><span>Preferred overs</span><b>${(p.prefOvers&&p.prefOvers.length)?p.prefOvers.map(phaseLabel).join(' + '):'—'}</b></div>
  <div class="kv"><span>Default approach</span><b>${esc(cap1(p.approach||'balanced'))}</b></div>
  <div class="kv"><span>Form / Fitness / Morale</span><b>${p.form} / ${p.fitness} / ${p.morale}</b></div>
@@ -162,9 +167,10 @@ function initTacState(d){const xiSet=new Set(d.xi);const saved=(d.tactics&&d.tac
  tacPlan={};Object.entries((d.tactics&&d.tactics.bowlingPlan)||{}).forEach(([pid,e])=>{tacPlan[pid]={pp:e.pp||0,mid:e.mid||0,death:e.death||0};});
  tacApproach={};d.xi.forEach(pid=>{const p=tacPlayer(pid);tacApproach[pid]=((d.tactics&&d.tactics.playerApproach)||{})[pid]||(p&&p.approach)||'balanced';});}
 function tacOrderHTML(){if(!tacOrder.length)return '<p>Tick a playing XI in the squad table above first.</p>';
- return tacOrder.map((pid,i)=>{const p=tacPlayer(pid);if(!p)return '';const diff=Math.abs((i+1)-(p.prefBatPos||i+1));
-  const fit=diff<=1?'<span class="badge" style="color:#7ee2a0">✓ happy</span>':`<span class="badge" style="color:#ffb35c">⚠ prefers #${p.prefBatPos}</span>`;
-  return `<div class="tacrow"><span class="tacpos">${i+1}</span>${avatarHTML(p)}<span class="tacname">${esc(p.name)}<br><span class="psub">${esc(p.role)} · Bat ${p.batting} · ${prefShort(p)}</span></span>${fit}
+ return tacOrder.map((pid,i)=>{const p=tacPlayer(pid);if(!p)return '';const pos=i+1;const set=(p.batPositions&&p.batPositions.length)?p.batPositions:[p.prefBatPos||pos];
+  const fit=set.includes(pos)?'<span class="badge" style="color:#7ee2a0">✓ happy</span>'
+   :(Math.min(...set.map(s=>Math.abs(s-pos)))<=1?`<span class="badge" style="color:#ffb35c">⚠ prefers ${batSetLabel(p)}</span>`:`<span class="badge" style="color:#ff7a7a">⚠⚠ prefers ${batSetLabel(p)}</span>`);
+  return `<div class="tacrow"><span class="tacpos">${pos}</span>${avatarHTML(p)}<span class="tacname">${esc(p.name)}<br><span class="psub">${esc(p.role)} · Bat ${p.batting} · ${prefShort(p)}</span></span>${fit}
   <select class="tacappr" onchange="setApproach('${pid}',this.value)">${['aggressive','balanced','defensive'].map(a=>`<option value="${a}" ${tacApproach[pid]===a?'selected':''}>${cap1(a)}</option>`).join('')}</select>
   <span class="tacmv"><button class="secondary" onclick="moveTac(${i},-1)" ${i===0?'disabled':''}>▲</button><button class="secondary" onclick="moveTac(${i},1)" ${i===tacOrder.length-1?'disabled':''}>▼</button></span></div>`;}).join('');}
 function tacPlanTotals(){const t={pp:0,mid:0,death:0};Object.values(tacPlan).forEach(e=>{t.pp+=e.pp||0;t.mid+=e.mid||0;t.death+=e.death||0;});t.total=t.pp+t.mid+t.death;return t;}
@@ -185,7 +191,7 @@ async function render(){saveNav();const v=$('#view');$('#err').textContent='';re
  try{
   if(tab==='Lobby'){const d=await api('/api/worlds');
    v.innerHTML=`<div class="panel"><h2>Game World Lobby</h2><div class="tblwrap"><table><tr><th>World</th><th>Creator</th><th>Managers</th><th>Status</th><th>Start</th><th>Format</th><th></th></tr>
-   ${d.worlds.map(w=>`<tr><td><b>${esc(w.name)}</b> ${w.isPrivate?'<span class="lock">🔒 Private</span>':''} ${w.aiFill?'🤖':''} ${w.squadMode==='draft'?'<span class="pill">⚖️ Draft</span>':''}</td><td>${esc(w.creatorName)}</td><td>${w.managersCount}/${w.numberOfClubs}</td><td><span class="pill">${esc(w.state)}</span></td><td>${new Date(w.startDate).toLocaleString()}</td><td>${esc(w.format)}</td><td><button onclick="openWorld('${w.id}')">View / Join</button></td></tr>`).join('')}</table></div></div>
+   ${d.worlds.map(w=>`<tr><td><b>${esc(w.name)}</b> ${w.isPrivate?'<span class="lock">🔒 Private</span>':''} ${w.aiFill?'🤖':''} ${w.squadMode==='draft'?'<span class="pill">⚖️ Draft</span>':''} ${w.pace==='fast'?'<span class="pill">⚡ Fast</span>':''}</td><td>${esc(w.creatorName)}</td><td>${w.managersCount}/${w.numberOfClubs}</td><td><span class="pill">${esc(w.state)}</span></td><td>${new Date(w.startDate).toLocaleString()}</td><td>${esc(w.format)}</td><td><button onclick="openWorld('${w.id}')">View / Join</button></td></tr>`).join('')}</table></div></div>
    <div class="panel"><h3>Create World</h3>
    <div class="formgrid">
    <span><label>World name</label><input id="wname" placeholder="World name"></span>
@@ -199,6 +205,7 @@ async function render(){saveNav();const v=$('#view');$('#err').textContent='';re
    <span><label>Season start</label><input id="wseason" type="datetime-local"></span>
    <span><label>World password (optional — stored hashed, never shown)</label><input id="wpass" type="password"></span>
    <span><label>Squad mode</label><select id="wmode"><option value="auction">Auction — empty squads, bid for players</option><option value="draft">Draft — squads distributed equally, then trade</option></select></span>
+   <span><label>Pace</label><select id="wpace"><option value="standard">Standard — a match every 3 days</option><option value="fast">Fast (test) — a match every 10 minutes</option></select></span>
    </div>
    <label class="chk"><input type="checkbox" id="waifill" checked> Fill empty clubs with AI managers (world can be started any time)</label><br>
    <button class="goldbtn" onclick="createWorld()">Create World</button></div>`;}
@@ -232,9 +239,9 @@ async function render(){saveNav();const v=$('#view');$('#err').textContent='';re
    <p style="margin:2px 0">Matches every ${w.matchIntervalDays} days at ${esc(w.matchTime)} (${esc(w.timezone)})</p></div>
    </div>`;}
   else if(tab==='Waiting Room'){const d=await api('/api/worlds/'+worldId);const w=d.world;const canStart=w.creatorId===me.id&&['CREATED','RECRUITING'].includes(w.state);
-   v.innerHTML=`<div class="panel"><h2>World Waiting Room — ${esc(w.name)}</h2><p>Status: <span class="pill">${esc(w.state)}</span> · Managers: ${w.managersCount}/${w.numberOfClubs} · Server time: ${new Date(d.serverNow).toLocaleString()}</p>
+   v.innerHTML=`<div class="panel"><h2>World Waiting Room — ${esc(w.name)}</h2><p>Status: <span class="pill">${esc(w.state)}</span> · Season ${w.seasonNumber||1}${w.pace==='fast'?' · <span class="pill">⚡ Fast pace</span>':''} · Managers: ${w.managersCount}/${w.numberOfClubs} · Server time: ${new Date(d.serverNow).toLocaleString()}</p>
    <p>World start: ${new Date(w.startDate).toLocaleString()} · Auction: ${new Date(w.auctionStartAt).toLocaleString()} · Season: ${new Date(w.seasonStartAt).toLocaleString()}</p>
-   <p>Rules: ${w.squadMode==='draft'?'Squads are <b>distributed equally</b> when the world starts (20 players per club, balanced by rating and role) — no auction; trade with other clubs afterwards in Transfers &amp; Offers.':'Squads start <b>empty</b>, 24-hour auctions,'} budget ₹100 Cr each, squads of 18–25 players, matches every ${w.matchIntervalDays} days at ${esc(w.matchTime)} (${esc(w.timezone)}), no Play Match button — fixtures auto-simulate at their scheduled server time.</p>
+   <p>Rules: ${w.squadMode==='draft'?'Squads are <b>distributed equally</b> when the world starts (20 players per club, balanced by rating and role) — no auction; trade with other clubs afterwards in Transfers &amp; Offers.':'Squads start <b>empty</b>, '+(w.pace==='fast'?'10-minute auctions':'24-hour auctions')+','} budget ₹100 Cr each, squads of 18–25 players, ${w.pace==='fast'?'matches every 10 minutes (fast pace)':`matches every ${w.matchIntervalDays} days at ${esc(w.matchTime)} (${esc(w.timezone)})`}, no Play Match button — fixtures auto-simulate at their scheduled server time. When a season ends, prize money is paid by league position and the next season starts automatically — squads carry over.</p>
    <h3>Joined managers</h3><div class="members">${d.members.map(m=>`<div class="member">${crestHTML(m.clubName,'sm')}<span><div class="mclub">${esc(m.clubName)}</div><div class="mmgr">${esc(m.managerName)}${m.ai?' <span class="aitag">🤖 AI</span>':''}</div></span></div>`).join('')||'<p>None yet</p>'}</div>
    ${d.myMembership?'':`<h3 style="margin-top:14px">Select your club</h3><div class="clubpick">${d.availableClubs.map(c=>`<label><input type="radio" name="club" value="${esc(c)}">${crestHTML(c,'sm')} ${esc(c)}</label>`).join('')}</div>
    ${w.isPrivate?'<label>World password</label><input id="jpass" type="password">':''}<button class="goldbtn" onclick="joinWorld()">Join World</button>`}</div>
@@ -289,9 +296,9 @@ async function render(){saveNav();const v=$('#view');$('#err').textContent='';re
      <div class="stat">Rating<b>${p.rating}</b></div><div class="stat">Batting<b>${p.batting}</b></div><div class="stat">Bowling<b>${p.bowling}</b></div>
      <div class="stat">Leadership<b>${p.leadership}</b></div><div class="stat">Base price<b>₹${p.baseValue} Cr</b></div>
      <div class="stat">Form<b>${p.form}</b></div><div class="stat">Fitness<b>${p.fitness}</b></div><div class="stat">Morale<b>${p.morale}</b></div>
-     <div class="stat">Prefers to bat<b>#${p.prefBatPos ?? '—'}</b></div><div class="stat">Preferred overs<b style="font-size:12px">${(p.prefOvers&&p.prefOvers.length)?p.prefOvers.map(phaseLabel).join(' + '):'—'}</b></div><div class="stat">Approach<b>${esc(cap1(p.approach||'balanced'))}</b></div>
+     <div class="stat">Prefers to bat<b style="font-size:12px">${batSetLabel(p)} · ★ #${p.prefBatPos ?? '—'}</b></div><div class="stat">Preferred overs<b style="font-size:12px">${(p.prefOvers&&p.prefOvers.length)?p.prefOvers.map(phaseLabel).join(' + '):'—'}</b></div><div class="stat">Approach<b>${esc(cap1(p.approach||'balanced'))}</b></div>
    </div>
-   <p style="margin-top:8px"><small>Players perform best in their preferred batting position and bowling phases — using them far from their preferences costs morale and form after the match (see the tactics report in the match result).</small></p></div></div></div>
+   <p style="margin-top:8px"><small>Players perform best at any of their preferred batting positions (★ = favourite) and bowling in their preferred phases — using them far outside their positions costs morale and form after the match (see the tactics report in the match result).</small></p></div></div></div>
    ${a?`<div class="panel"><h3>🔨 Auction</h3>
    <p>Status: <span class="pill">${esc(a.status)}</span> · Current price: <b style="color:var(--gold)">₹${a.currentPrice} Cr</b> · Leader: ${a.highestBid?(a.leaderUndisclosed?'<span class="undisc">Undisclosed</span>':esc(a.highestBidderClub)):'No bids yet'}
    <br>Ends: ${new Date(a.auctionEndsAt).toLocaleString()} (${countdown(a.auctionEndsAt,d.serverNow)} left) · ${a.bidsCount} bid(s)</p>
@@ -320,7 +327,7 @@ async function render(){saveNav();const v=$('#view');$('#err').textContent='';re
    </div>`;$('#tbat').value=d.tactics.battingApproach||'Balanced';}
   else if(tab==='Tactics'){const d=await api(`/api/worlds/${worldId}/squad`);squadCache=d;initTacState(d);
    v.innerHTML=`<div class="panel"><h2>🎯 Captain &amp; Tactics — ${esc(d.clubName)}</h2>
-   <p>Pick your XI, then set <b>where everyone bats</b>, <b>who bowls which overs</b> and <b>how each player plays</b>. Players used far from their preferred position/phases lose morale and form after the match — the match report carries a tactics report. Everything locks 30 minutes before your next match. If you change the XI ticks, save once and the editors below rebuild for the new XI.</p>
+   <p>Pick your XI, then set <b>where everyone bats</b>, <b>who bowls which overs</b> and <b>how each player plays</b>. Players used far outside their happy positions/phases lose morale and form after the match — the match report carries a tactics report. Everything locks shortly before your next match (30 minutes in standard pace, 2 minutes in fast pace). If you change the XI ticks, save once and the editors below rebuild for the new XI.</p>
    ${squadTableHTML(d)}
    <label>Team batting approach</label><select id="tbat"><option>Balanced</option><option>Aggressive</option><option>Defensive</option></select></div>
    <div class="split">
@@ -361,7 +368,7 @@ async function render(){saveNav();const v=$('#view');$('#err').textContent='';re
    <div class="panel"><h3>📤 Outgoing offers (${outgoing.length})</h3>${outgoing.length?outgoing.map(o=>offerRow(o,o.status==='PENDING'?`<button class="secondary" onclick="offerWithdraw('${o.id}')">Withdraw</button>`:'')).join(''):'<p>You have made no offers.</p>'}</div>`;
    trPrefill=null;}
   else if(tab==='Fixtures'){const d=await api(`/api/worlds/${worldId}/fixtures`);
-   v.innerHTML=`<div class="panel"><h2>📅 Fixtures & Match Centre</h2><p>No “Play Match” button — matches start automatically at their scheduled server time. Tactical lock: 30 minutes before start. The <b>home manager</b> prepares the pitch — set it per match below (until the lock) or set a standing home pitch on Captain &amp; Tactics.</p>
+   v.innerHTML=`<div class="panel"><h2>📅 Fixtures & Match Centre</h2><p>No “Play Match” button — matches start automatically at their scheduled server time. Tactical lock: 30 minutes before start (2 minutes in fast-pace worlds). The <b>home manager</b> prepares the pitch — set it per match below (until the lock) or set a standing home pitch on Captain &amp; Tactics.</p>
    <div class="tblwrap"><table><tr><th>Rd</th><th>Fixture</th><th>Scheduled</th><th>Pitch</th><th>Status</th><th>Result / Report</th></tr>
    ${d.fixtures.map(f=>`<tr><td>${f.round}</td><td><span class="fxcell"><span class="pcell">${crestHTML(f.homeClub,'sm')}<span>${esc(f.homeClub)}</span></span><span class="vsmid" style="font-size:12px">vs</span><span class="pcell">${crestHTML(f.awayClub,'sm')}<span>${esc(f.awayClub)}</span></span></span></td><td>${new Date(f.scheduledAt).toLocaleString()} ${esc(f.timezone)}${f.locked?' · 🔒 XI locked':''}</td>
    <td>${f.isHome&&!f.result&&!f.locked?`<span class="bidform"><select id="pitch-${f.id}">${['batting','balanced','bowling'].map(pp=>`<option value="${pp}" ${f.pitch===pp?'selected':''}>${cap1(pp)}</option>`).join('')}</select><button class="secondary" onclick="setFixturePitch('${f.id}')">Set</button></span><br><small>${f.pitchSet?'Match pitch':'Your home default'}</small>`:`${cap1(f.pitch||'balanced')}${f.pitchSet?'':' (default)'}`}</td><td><span class="pill">${esc(f.status)}</span></td>
@@ -392,7 +399,7 @@ function playerRows(list){return list.map(a=>`<tr class="clickable" onclick="ope
 window.filterAuctions=q=>{if(!aucCache)return;const list=aucCache.auctions.filter(a=>a.player.name.toLowerCase().includes(q.toLowerCase()));const host=$('#aucList');if(host)host.innerHTML=auctionListRows(list,aucCache.serverNow);};
 window.filterPlayers=q=>{if(!aucCache)return;const list=aucCache.auctions.filter(a=>a.player.name.toLowerCase().includes(q.toLowerCase()));$('#aucBody').innerHTML=playerRows(list);};
 window.openWorld=id=>{worldId=id;sideCache=null;focusPid=null;tab='Waiting Room';renderTabs();render();};
-window.createWorld=async()=>{try{const body={name:$('#wname').value,description:$('#wdesc').value,numberOfClubs:$('#wnum').value,format:$('#wfmt').value,matchIntervalDays:$('#wint').value,matchTime:$('#wtime').value,startDate:$('#wstart').value||undefined,auctionStartAt:$('#wauc').value||undefined,seasonStartAt:$('#wseason').value||undefined,password:$('#wpass').value||undefined,aiFill:$('#waifill').checked,squadMode:$('#wmode').value};
+window.createWorld=async()=>{try{const body={name:$('#wname').value,description:$('#wdesc').value,numberOfClubs:$('#wnum').value,format:$('#wfmt').value,matchIntervalDays:$('#wint').value,matchTime:$('#wtime').value,startDate:$('#wstart').value||undefined,auctionStartAt:$('#wauc').value||undefined,seasonStartAt:$('#wseason').value||undefined,password:$('#wpass').value||undefined,aiFill:$('#waifill').checked,squadMode:$('#wmode').value,pace:$('#wpace').value};
 // ---- transfer market actions ----
 window.trSetClub=v=>{trClub=v;render();};
 window.openTransferFor=(pid,mid)=>{trPrefill={pid,ownerMid:mid};tab='Transfers';renderTabs();render();};
