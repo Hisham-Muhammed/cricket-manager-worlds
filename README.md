@@ -142,7 +142,7 @@ in `src/server.js` / `src/scheduler.js`.
 │   └── styles.css
 ├── supabase/
 │   ├── schema.sql     # PRODUCTION schema: all tables, place_bid(), RLS policies
-│   └── seed.sql       # real player pool (44 players, mirrors src/players.js)
+│   └── seed.sql       # real player pool (409 players, mirrors src/players.js)
 ├── src/
 │   ├── server.js      # Express API: auth, worlds, join, bids, XI, league
 │   ├── supabase.js    # Supabase service-role client + DATABASE_MODE switch

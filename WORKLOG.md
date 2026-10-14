@@ -87,3 +87,20 @@ actually done and reviewed, in the order it happened.
 - Queued for this codebase (landing first in the hosted game): AI
   managers to fill empty clubs so a world is playable solo, and a
   creator "start anytime" control for worlds.
+
+### 2026-10-14 — IPL 2026 player pool added (GitHub codebase)
+- Player database expanded from 44 to 409: the original star set
+  (retained-player names like Kohli/Rohit/Bumrah, who are not in any
+  auction list) merged with the published IPL 2026 final auction
+  list (350) + 19 reported late additions. Auction duplicates of
+  existing stars (Hasaranga, Ravindra, de Kock, Smith) keep the
+  original tuned entries.
+- For auction players, name/nationality/role/base price are the real
+  published data (base price = in-game base value in ₹ Cr, ₹2 Cr
+  down to ₹30 L). Ratings are game-balancing estimates derived from
+  the price bracket + capped status — the same convention the star
+  set already used, and labelled as such in players.js.
+- Ages are not published in the auction list, so auction players
+  carry age NULL: schema.sql now allows it, seed.sql documents the
+  one-line ALTER for existing projects, and the UI shows '—'.
+- seed.sql regenerated from players.js (409 rows).

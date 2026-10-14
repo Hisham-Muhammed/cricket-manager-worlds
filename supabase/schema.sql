@@ -41,7 +41,7 @@ create table if not exists public.managers (
 create table if not exists public.players (
   id          text primary key,              -- e.g. 'player_1' (matches src/players.js)
   name        text not null,
-  age         int  not null,
+  age         int,                            -- nullable: the published IPL auction list has no ages; auction-pool players ship age NULL (existing projects: alter table public.players alter column age drop not null;)
   role        text not null check (role in ('Batsman','Bowler','All-Rounder','Wicket-Keeper')),
   nationality text not null,
   rating      int  not null check (rating between 1 and 99),

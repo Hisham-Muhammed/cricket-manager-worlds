@@ -37,7 +37,7 @@ async function render(){const v=$('#view');$('#err').textContent='';
    ${w.isPrivate?'<label>World password</label><input id="jpass" type="password">':''}<button onclick="joinWorld()">Join World</button>`}</div>`;}
   else if(tab==='Auction'){const d=await api(`/api/worlds/${worldId}/auction`);
    v.innerHTML=`<div class="card"><h2>Player Auction Market (world state: ${esc(d.state)})</h2><p>Countdowns are computed from stored <code>auctionEndsAt</code> + server time (${new Date(d.serverNow).toLocaleString()}). Auctions settle automatically at expiry.</p></div><div class="grid">
-   ${d.auctions.map(a=>`<div class="card"><b>${esc(a.player.name)}</b> · ${esc(a.player.role)} · ${esc(a.player.nationality)}<br>Age ${a.player.age} · Rating ${a.player.rating} · Base ₹${a.baseValue} Cr<br>
+   ${d.auctions.map(a=>`<div class="card"><b>${esc(a.player.name)}</b> · ${esc(a.player.role)} · ${esc(a.player.nationality)}<br>Age ${a.player.age ?? '—'} · Rating ${a.player.rating} · Base ₹${a.baseValue} Cr<br>
    Ends: ${new Date(a.auctionEndsAt).toLocaleString()} (${countdown(a.auctionEndsAt,d.serverNow)} left) · Status ${esc(a.status)}<br>
    Highest: ${a.highestBid?`₹${a.highestBid} Cr — ${esc(a.highestBidderClub)}`:'No bids yet'}<br>
    <input id="bid-${a.auctionId}" type="number" step="0.1" placeholder="Your bid ₹ Cr"><button onclick="bid('${a.auctionId}')">Place bid</button>
