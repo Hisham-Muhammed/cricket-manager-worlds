@@ -119,3 +119,13 @@ actually done and reviewed, in the order it happened.
   final leg (a real Google account completing sign-in) needs the
   server running with the project's real keys — deployment-time
   verification, like the rest of supabase mode.
+
+### 2026-10-14 — Free public website: Render blueprint added
+- Hosting decision: Oracle Cloud Always Free is not possible (its
+  signup requires a bank card; the user has none). Render free tier
+  needs no card — GitHub sign-in only.
+- Added `render.yaml` (free web service, `npm install` / `npm start`,
+  health check `/api/server-time`, SESSION_SECRET generated,
+  DATABASE_MODE=local for the first deploy). Known free-tier limits,
+  documented in the file: sleeps when idle and ephemeral filesystem
+  until Supabase migration step 2 (worlds) makes state durable.

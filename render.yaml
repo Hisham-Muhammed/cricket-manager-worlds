@@ -1,0 +1,27 @@
+# Render Blueprint — free public website for Cricket Manager Worlds.
+# Dashboard -> New -> Blueprint -> pick this repo, or create a Web
+# Service manually with the same build/start commands below.
+# Free plan notes: the service sleeps after ~15 min idle (first visit
+# wakes it, ~1 min) and the filesystem is ephemeral — game state in
+# local mode resets on restart/redeploy until the Supabase migration
+# (worlds step) makes it durable. Auth already runs on Supabase when
+# DATABASE_MODE=supabase and the keys below are filled in.
+services:
+  - type: web
+    name: cricket-manager-worlds
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/server-time
+    envVars:
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: DATABASE_MODE
+        value: local # switch to "supabase" + fill the keys below after migration step 2
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
