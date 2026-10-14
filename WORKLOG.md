@@ -224,3 +224,25 @@ First feedback from playing the live Render site, four features:
   DATABASE_MODE=local for the first deploy). Known free-tier limits,
   documented in the file: sleeps when idle and ephemeral filesystem
   until Supabase migration step 2 (worlds) makes state durable.
+
+### 2026-10-14 — Real player photos wired in (Wikimedia Commons)
+- The user asked for original player photos instead of generated art.
+  A verified manifest (research: every URL HEAD-checked, free licenses
+  only — CC BY / CC BY-SA / CC0 / public domain / GODL-India) covers
+  **95 of the 409** pool players; the other 314 have no freely licensed
+  Commons photo (non-free article images or no article), so nothing
+  unverified was substituted.
+- `src/photos.json` (name → photoUrl/filePage/license/credit) is loaded
+  by the server at boot (tolerant if missing) and never served as a
+  route. The shared player builders in `src/server.js` (auction view,
+  player detail, squad) now add `photoUrl`, `photoCredit`,
+  `photoLicense` and `photoPage` — real values for manifest players,
+  null otherwise.
+- Client: `portraitFor()` resolves real photo first, then the
+  generated role portraits in `/assets/`, then the initials avatar.
+  The player detail page shows a "Photo: <credit> · <license>" line
+  linking to the Commons file page; the Player Database footer credits
+  Wikimedia Commons for photos and notes generated artwork for others.
+- Tests: 19/19 — new test pins Kohli's photoUrl (upload.wikimedia.org)
+  in the auction list + player detail, and photoUrl null for a
+  non-manifest player (Klaasen).

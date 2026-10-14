@@ -7,6 +7,11 @@ const path = require('path');
 const crypto = require('crypto');
 const { load, save, init, id, nowISO, emit, notify, news } = require('./db');
 const PLAYERS = require('./players');
+// Real player photos: src/photos.json maps exact player names to
+// verified Wikimedia Commons photos (free licenses). Loaded server-side
+// only — never served as a route. A missing file simply means no photos.
+let PHOTOS = {};
+try { PHOTOS = require('./photos.json'); } catch { PHOTOS = {}; }
 const { startScheduler, tick, startWorld } = require('./scheduler');
 const { topBid, validBids, validateBid, placeBid } = require('./bids');
 const supa = require('./supabase');
@@ -80,6 +85,12 @@ const pubUser = (db, u) => ({ id: u.id, name: u.name, email: u.email, provider: 
   stats: u.stats, trophies: u.trophies, history: u.history, createdAt: u.createdAt });
 const memberOf = (db, worldId, userId) => db.memberships.find(m => m.worldId === worldId && m.userId === userId);
 const tpl = wp => PLAYERS.find(p => p.id === wp.templateId) || {};
+// Photo fields for a player template: real Commons photo + attribution
+// when the manifest has the player's exact name, nulls otherwise (the
+// client then falls back to generated role artwork / initials).
+const photoFields = t => { const e = t && PHOTOS[t.name];
+  return e ? { photoUrl: e.photoUrl || null, photoCredit: e.credit || null, photoLicense: e.license || null, photoPage: e.filePage || null }
+           : { photoUrl: null, photoCredit: null, photoLicense: null, photoPage: null }; };
 
 // ---------- auth routes ----------
 app.post('/api/auth/register', async (req, res) => {
@@ -300,7 +311,7 @@ function auctionView(db, a, viewerMembershipId, userId) {
   const leaderHidden = !!top && !!top.undisclosed && top.membershipId !== viewerMembershipId;
   const owner = wp && wp.ownerMembershipId && db.memberships.find(m => m.id === wp.ownerMembershipId);
   return { auctionId: a.id, worldPlayerId: a.worldPlayerId,
-    player: { id: wp && wp.id, worldPlayerId: wp && wp.id, name: t.name, age: t.age, role: t.role, nationality: t.nationality, rating: t.rating, batting: t.batting, bowling: t.bowling, leadership: t.leadership },
+    player: { id: wp && wp.id, worldPlayerId: wp && wp.id, name: t.name, age: t.age, role: t.role, nationality: t.nationality, rating: t.rating, batting: t.batting, bowling: t.bowling, leadership: t.leadership, ...photoFields(t) },
     baseValue: a.baseValue, auctionStartsAt: a.auctionStartsAt, auctionEndsAt: a.auctionEndsAt, status: a.status,
     currentPrice: top ? top.amount : a.baseValue, // the price is always public
     highestBid: top ? top.amount : null, highestBidderClub: top ? (leaderHidden ? 'Undisclosed' : (tm ? tm.clubName : null)) : null,
@@ -329,7 +340,7 @@ app.get('/api/worlds/:wid/players/:pid', auth, (req, res) => { const db = load()
     .sort((x, y) => new Date(y.createdAt) - new Date(x.createdAt) || y.amount - x.amount)
     .map(b => bidView(db, b, mine && mine.id)) : [];
   res.json({ player: { worldPlayerId: wp.id, templateId: wp.templateId, name: t.name, age: t.age, role: t.role,
-      nationality: t.nationality, rating: t.rating, batting: t.batting, bowling: t.bowling, leadership: t.leadership,
+      nationality: t.nationality, rating: t.rating, batting: t.batting, bowling: t.bowling, leadership: t.leadership, ...photoFields(t),
       baseValue: t.baseValue, form: wp.form, fitness: wp.fitness, morale: wp.morale, status: wp.status,
       ownerClub: owner ? owner.clubName : null },
     auction: auction ? auctionView(db, auction, mine && mine.id, req.user.id) : null,
@@ -385,7 +396,7 @@ app.post('/api/auctions/:id/watchlist', auth, (req, res) => { const db = load();
 app.get('/api/worlds/:id/squad', auth, (req, res) => { const db = load(); const m = memberOf(db, req.params.id, req.user.id);
   if (!m) return res.status(403).json({ error: 'Not a member of this world.' });
   const squad = db.worldPlayers.filter(p => p.worldId === req.params.id && p.ownerMembershipId === m.id)
-    .map(p => ({ ...tpl(p), worldPlayerId: p.id, form: p.form, fitness: p.fitness, morale: p.morale, isCaptain: m.captainId === p.id, isViceCaptain: m.viceCaptainId === p.id }));
+    .map(p => { const t = tpl(p); return { ...t, ...photoFields(t), worldPlayerId: p.id, form: p.form, fitness: p.fitness, morale: p.morale, isCaptain: m.captainId === p.id, isViceCaptain: m.viceCaptainId === p.id }; });
   res.json({ squad, budget: m.budget, xi: m.xi, tactics: m.tactics, captainId: m.captainId, viceCaptainId: m.viceCaptainId, clubName: m.clubName }); });
 app.post('/api/worlds/:id/captain', auth, (req, res) => { const db = load(); const m = memberOf(db, req.params.id, req.user.id);
   if (!m) return res.status(403).json({ error: 'Not a member.' });
