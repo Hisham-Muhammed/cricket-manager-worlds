@@ -4,9 +4,11 @@ const cookieParser = require('cookie-parser');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const path = require('path');
+const crypto = require('crypto');
 const { load, save, id, nowISO, emit, notify, news } = require('./db');
 const PLAYERS = require('./players');
-const { startScheduler, tick } = require('./scheduler');
+const { startScheduler, tick, startWorld } = require('./scheduler');
+const { topBid, validBids, validateBid, placeBid } = require('./bids');
 const supa = require('./supabase');
 
 const SECRET = process.env.SESSION_SECRET || 'dev-only-change-me';
@@ -122,7 +124,7 @@ app.post('/api/auth/login', async (req, res) => {
   }
   const db = load();
   const u = db.users.find(x => x.email.toLowerCase() === String(email || '').toLowerCase());
-  if (!u || !u.passwordHash || !bcrypt.compareSync(password || '', u.passwordHash)) return res.status(401).json({ error: 'Invalid email or password.' });
+  if (!u || u.ai || !u.passwordHash || !bcrypt.compareSync(password || '', u.passwordHash)) return res.status(401).json({ error: 'Invalid email or password.' }); // AI managers can never sign in
   res.cookie('token', sign(u), { httpOnly: true, sameSite: 'lax', maxAge: 30 * 864e5 }).json({ user: pubUser(db, u), serverNow: nowISO() });
 });
 app.post('/api/auth/logout', (req, res) => res.clearCookie('token').json({ ok: true }));
@@ -182,7 +184,7 @@ const pubWorld = (db, w, userId) => ({ id: w.id, name: w.name, description: w.de
   managersCount: db.memberships.filter(m => m.worldId === w.id).length, status: w.state, state: w.state,
   startDate: w.startDate, auctionStartAt: w.auctionStartAt, seasonStartAt: w.seasonStartAt, format: w.format,
   competitionStructure: w.competitionStructure, matchIntervalDays: w.matchIntervalDays, matchTime: w.matchTime,
-  timezone: w.timezone, seasonLength: w.seasonLength, isPrivate: !!w.passwordHash,
+  timezone: w.timezone, seasonLength: w.seasonLength, isPrivate: !!w.passwordHash, aiFill: w.aiFill !== false,
   joined: userId ? !!memberOf(db, w.id, userId) : false, serverNow: nowISO() });
 
 app.get('/api/worlds', auth, (req, res) => { const db = load(); res.json({ worlds: db.worlds.map(w => pubWorld(db, w, req.user.id)), serverNow: nowISO() }); });
@@ -200,6 +202,7 @@ app.post('/api/worlds', auth, (req, res) => {
     startDate: start.toISOString(), auctionStartAt: (b.auctionStartAt ? new Date(b.auctionStartAt) : new Date(start.getTime() + 24 * 3600 * 1000)).toISOString(),
     seasonStartAt: (b.seasonStartAt ? new Date(b.seasonStartAt) : new Date(start.getTime() + 4 * 24 * 3600 * 1000)).toISOString(),
     passwordHash: b.password ? bcrypt.hashSync(b.password, 12) : null, // hashed, never returned
+    aiFill: b.aiFill !== false, // empty clubs are filled with AI managers when the creator starts the world
     state: 'RECRUITING', createdAt: nowISO() };
   db.worlds.push(w); emit(db, w.id, 'WORLD_CREATED', { name: w.name }); save();
   res.status(201).json({ world: pubWorld(db, w, req.user.id) });
@@ -209,7 +212,7 @@ app.get('/api/worlds/:id', auth, (req, res) => { const db = load(); const w = db
   const taken = db.memberships.filter(m => m.worldId === w.id).map(m => m.clubName);
   res.json({ world: pubWorld(db, w, req.user.id),
     availableClubs: CLUBS.slice(0, w.numberOfClubs).filter(c => !taken.includes(c)),
-    members: db.memberships.filter(m => m.worldId === w.id).map(m => ({ clubName: m.clubName, managerName: (db.users.find(u => u.id === m.userId) || {}).name || '', budget: m.budget })),
+    members: db.memberships.filter(m => m.worldId === w.id).map(m => ({ clubName: m.clubName, managerName: (db.users.find(u => u.id === m.userId) || {}).name || '', budget: m.budget, ai: !!m.ai })),
     myMembership: memberOf(db, w.id, req.user.id) || null, serverNow: nowISO() }); });
 
 app.post('/api/worlds/:id/join', auth, (req, res) => {
@@ -231,19 +234,106 @@ app.post('/api/worlds/:id/join', auth, (req, res) => {
   save(); res.status(201).json({ membership: m, budget: START_BUDGET, squad: [] });
 });
 
+// ---------- AI managers + creator start ----------
+// An AI manager is a normal manager record flagged ai:true, created
+// internally only: it gets a random, unusable password hash and the
+// login route refuses ai accounts outright, so it can never be signed
+// into. Its membership is identical to a human's (₹100 Cr, empty squad).
+function fillAiManagers(db, w) {
+  const taken = db.memberships.filter(m => m.worldId === w.id).map(m => m.clubName);
+  const free = CLUBS.slice(0, w.numberOfClubs).filter(c => !taken.includes(c));
+  let added = 0;
+  for (const clubName of free) {
+    const short = clubName.split(/\s+/).map(x => x[0]).join('').toUpperCase();
+    let email = `ai.${w.id.slice(-6)}.${short.toLowerCase()}@ai.local`;
+    let n = 2; while (db.users.some(u => u.email === email)) email = `ai.${w.id.slice(-6)}.${short.toLowerCase()}${n++}@ai.local`;
+    const u = { id: id('mgr'), name: `AI Manager — ${short}`, email,
+      passwordHash: bcrypt.hashSync(crypto.randomBytes(32).toString('hex'), 12), // random: unknowable, so no login is possible
+      provider: 'ai', ai: true, profileImage: '', createdAt: nowISO(),
+      stats: { matchesManaged: 0, wins: 0, auctionsWon: 0 }, trophies: [], history: [] };
+    db.users.push(u);
+    const m = { id: id('mem'), worldId: w.id, userId: u.id, clubName, budget: START_BUDGET, ai: true,
+      xi: [], tactics: { formation: 'Balanced', battingApproach: 'Balanced', bowlingApproach: 'Balanced' }, captainId: null, viceCaptainId: null, joinedAt: nowISO(), lastSeenAt: nowISO() };
+    db.memberships.push(m);
+    db.league.push({ id: id('lg'), worldId: w.id, membershipId: m.id, played: 0, won: 0, lost: 0, tied: 0, points: 0, runsFor: 0, runsAgainst: 0, nrr: 0 });
+    emit(db, w.id, 'MANAGER_JOINED', { clubName, ai: true });
+    added++;
+  }
+  return added;
+}
+
+app.post('/api/worlds/:id/start', auth, (req, res) => {
+  const db = load(); const w = db.worlds.find(x => x.id === req.params.id);
+  if (!w) return res.status(404).json({ error: 'World not found.' });
+  if (w.creatorId !== req.user.id) return res.status(403).json({ error: 'Only the world creator can start this world.' });
+  if (!['CREATED', 'RECRUITING'].includes(w.state)) return res.status(409).json({ error: 'This world has already started.' });
+  if (!memberOf(db, w.id, req.user.id)) return res.status(400).json({ error: 'Join a club in this world before starting it.' });
+  let aiAdded = 0;
+  if (w.aiFill !== false) aiAdded = fillAiManagers(db, w);
+  const total = db.memberships.filter(m => m.worldId === w.id).length;
+  if (total < 2) return res.status(400).json({ error: 'At least 2 managers are needed to start a world.' });
+  startWorld(db, w);
+  save();
+  res.json({ world: pubWorld(db, w, req.user.id), aiAdded, managersCount: total, serverNow: nowISO() });
+});
+
 // ---------- auction ----------
+// ---------- auction views (undisclosed bids are masked here) ----------
+// An undisclosed bid hides its amount AND its bidder from everyone
+// except the bidder themself. The auction's current PRICE stays public
+// (you must be able to bid against it); only the leader's identity is
+// hidden when the leading bid is undisclosed. Settlement always uses
+// the real stored amounts.
+function bidView(db, bid, viewerMembershipId) {
+  const m = db.memberships.find(x => x.id === bid.membershipId);
+  const u = m && db.users.find(x => x.id === m.userId);
+  const mine = bid.membershipId === viewerMembershipId;
+  const hidden = !!bid.undisclosed && !mine;
+  return { id: bid.id, auctionId: bid.auctionId, amount: hidden ? null : bid.amount,
+    undisclosed: !!bid.undisclosed, status: bid.status, createdAt: bid.createdAt, mine,
+    managerName: hidden ? 'Undisclosed' : (u ? u.name : ''), clubName: hidden ? 'Undisclosed' : (m ? m.clubName : '') };
+}
+function auctionView(db, a, viewerMembershipId, userId) {
+  const wp = db.worldPlayers.find(p => p.id === a.worldPlayerId); const t = tpl(wp || {});
+  const top = topBid(db, a.id);
+  const tm = top && db.memberships.find(m => m.id === top.membershipId);
+  const leaderHidden = !!top && !!top.undisclosed && top.membershipId !== viewerMembershipId;
+  const owner = wp && wp.ownerMembershipId && db.memberships.find(m => m.id === wp.ownerMembershipId);
+  return { auctionId: a.id, worldPlayerId: a.worldPlayerId,
+    player: { id: wp && wp.id, worldPlayerId: wp && wp.id, name: t.name, age: t.age, role: t.role, nationality: t.nationality, rating: t.rating, batting: t.batting, bowling: t.bowling, leadership: t.leadership },
+    baseValue: a.baseValue, auctionStartsAt: a.auctionStartsAt, auctionEndsAt: a.auctionEndsAt, status: a.status,
+    currentPrice: top ? top.amount : a.baseValue, // the price is always public
+    highestBid: top ? top.amount : null, highestBidderClub: top ? (leaderHidden ? 'Undisclosed' : (tm ? tm.clubName : null)) : null,
+    leaderUndisclosed: leaderHidden, ownerClub: owner ? owner.clubName : null,
+    bidsCount: validBids(db, a.id).length,
+    watched: userId ? db.watchlist.some(x => x.userId === userId && x.auctionId === a.id) : false };
+}
+
 app.get('/api/worlds/:id/auction', auth, (req, res) => { const db = load(); const w = db.worlds.find(x => x.id === req.params.id);
   if (!w) return res.status(404).json({ error: 'World not found.' });
-  const list = db.auctions.filter(a => a.worldId === w.id).map(a => {
-    const wp = db.worldPlayers.find(p => p.id === a.worldPlayerId); const t = tpl(wp || {});
-    const bids = db.bids.filter(b => b.auctionId === a.id && b.status === 'VALID').sort((x, y) => y.amount - x.amount || new Date(x.createdAt) - new Date(y.createdAt));
-    const top = bids[0]; const tm = top && db.memberships.find(m => m.id === top.membershipId);
-    return { auctionId: a.id, player: { id: wp && wp.id, name: t.name, age: t.age, role: t.role, nationality: t.nationality, rating: t.rating, batting: t.batting, bowling: t.bowling, leadership: t.leadership },
-      baseValue: a.baseValue, auctionStartsAt: a.auctionStartsAt, auctionEndsAt: a.auctionEndsAt, status: a.status,
-      highestBid: top ? top.amount : null, highestBidderClub: tm ? tm.clubName : null,
-      watched: db.watchlist.some(x => x.userId === req.user.id && x.auctionId === a.id) };
-  });
+  const mine = memberOf(db, w.id, req.user.id);
+  const list = db.auctions.filter(a => a.worldId === w.id).map(a => auctionView(db, a, mine && mine.id, req.user.id));
   res.json({ auctions: list, state: w.state, serverNow: nowISO() }); });
+
+// Player detail: full player info + its auction + complete bid history
+// (masked per-viewer). This powers the SPA's player page.
+app.get('/api/worlds/:wid/players/:pid', auth, (req, res) => { const db = load(); const w = db.worlds.find(x => x.id === req.params.wid);
+  if (!w) return res.status(404).json({ error: 'World not found.' });
+  const wp = db.worldPlayers.find(p => p.id === req.params.pid && p.worldId === w.id);
+  if (!wp) return res.status(404).json({ error: 'Player not found.' });
+  const t = tpl(wp);
+  const mine = memberOf(db, w.id, req.user.id);
+  const auction = db.auctions.find(a => a.worldPlayerId === wp.id);
+  const owner = wp.ownerMembershipId && db.memberships.find(m => m.id === wp.ownerMembershipId);
+  const history = auction ? db.bids.filter(b => b.auctionId === auction.id)
+    .sort((x, y) => new Date(y.createdAt) - new Date(x.createdAt) || y.amount - x.amount)
+    .map(b => bidView(db, b, mine && mine.id)) : [];
+  res.json({ player: { worldPlayerId: wp.id, templateId: wp.templateId, name: t.name, age: t.age, role: t.role,
+      nationality: t.nationality, rating: t.rating, batting: t.batting, bowling: t.bowling, leadership: t.leadership,
+      baseValue: t.baseValue, form: wp.form, fitness: wp.fitness, morale: wp.morale, status: wp.status,
+      ownerClub: owner ? owner.clubName : null },
+    auction: auction ? auctionView(db, auction, mine && mine.id, req.user.id) : null,
+    bids: history, myMembership: mine || null, serverNow: nowISO() }); });
 
 app.post('/api/auctions/:id/bid', auth, (req, res) => {
   const db = load(); const a = db.auctions.find(x => x.id === req.params.id);
@@ -254,22 +344,37 @@ app.post('/api/auctions/:id/bid', auth, (req, res) => {
   if (!m) return res.status(403).json({ error: 'You are not a manager in this world.' });
   const amount = +(req.body || {}).amount;
   if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid bid.' });
-  const valid = db.bids.filter(b => b.auctionId === a.id && b.status === 'VALID');
-  const top = valid.sort((x, y) => y.amount - x.amount)[0];
+  const top = topBid(db, a.id);
   if (top && amount <= top.amount) return res.status(400).json({ error: 'Bid must be higher than the current highest bid.' });
   if (amount < a.baseValue) return res.status(400).json({ error: 'Bid must be at least the base value.' });
-  // Server-side budget validation: budget minus this manager's other live leading bids
-  const myLeading = db.bids.filter(b => b.status === 'VALID' && db.auctions.some(x => x.id === b.auctionId && x.worldId === a.worldId))
-    .filter(b => { const others = db.bids.filter(o => o.auctionId === b.auctionId && o.status === 'VALID'); return b.membershipId === m.id && others.every(o => o.amount <= b.amount) && b.auctionId !== a.id; })
-    .reduce((s, b) => s + b.amount, 0);
-  if (amount > m.budget - myLeading) return res.status(400).json({ error: 'Insufficient transfer funds.' });
-  const bid = { id: id('bid'), auctionId: a.id, membershipId: m.id, amount, createdAt: nowISO(), status: 'VALID' };
-  db.bids.push(bid); a.highestBidId = bid.id;
+  // Squad-size (max 25) + budget guard (keep enough to reach 18 players)
+  const guard = validateBid(db, m, a, amount);
+  if (guard) return res.status(400).json({ error: guard });
+  const bid = placeBid(db, m, a, amount, { undisclosed: !!(req.body || {}).undisclosed });
+  save(); res.status(201).json({ bid: bidView(db, bid, m.id), auction: auctionView(db, a, m.id, req.user.id), serverNow: nowISO() });
+});
+
+app.post('/api/auctions/:id/withdraw', auth, (req, res) => {
+  const db = load(); const a = db.auctions.find(x => x.id === req.params.id);
+  if (!a) return res.status(404).json({ error: 'Auction not found.' });
+  if (a.status !== 'OPEN') return res.status(409).json({ error: 'This auction is closed / player already sold.' });
+  if (Date.now() >= new Date(a.auctionEndsAt).getTime()) return res.status(409).json({ error: 'This auction has expired.' });
+  const m = memberOf(db, a.worldId, req.user.id);
+  if (!m) return res.status(403).json({ error: 'You are not a manager in this world.' });
+  // The caller's own highest live bid is withdrawn — allowed even when leading.
+  const mine = validBids(db, a.id).filter(b => b.membershipId === m.id);
+  if (!mine.length) return res.status(400).json({ error: 'You have no bid on this auction to withdraw.' });
+  const bid = mine[0];
+  bid.status = 'WITHDRAWN';
+  const top = topBid(db, a.id); // leader/current price recomputed from what remains
+  a.highestBidId = top ? top.id : null;
   const wp = db.worldPlayers.find(p => p.id === a.worldPlayerId);
-  emit(db, a.worldId, 'BID_PLACED', { player: tpl(wp || {}).name, amount, club: m.clubName });
-  if (top && top.membershipId !== m.id) { const out = db.memberships.find(x => x.id === top.membershipId);
-    if (out) notify(db, out.userId, a.worldId, 'BID_PLACED', `Your bid for ${tpl(wp || {}).name} was outbid.`); }
-  save(); res.status(201).json({ bid, serverNow: nowISO() });
+  const playerName = tpl(wp || {}).name;
+  if (bid.undisclosed) emit(db, a.worldId, 'BID_WITHDRAWN', { player: playerName, undisclosed: true });
+  else emit(db, a.worldId, 'BID_WITHDRAWN', { player: playerName, club: m.clubName });
+  if (top && top.membershipId !== m.id) { const leader = db.memberships.find(x => x.id === top.membershipId);
+    if (leader) notify(db, leader.userId, a.worldId, 'BID_WITHDRAWN', `A higher bid for ${playerName} was withdrawn — you are leading this auction again.`); }
+  save(); res.json({ ok: true, withdrawnBidId: bid.id, auction: auctionView(db, a, m.id, req.user.id), serverNow: nowISO() });
 });
 app.post('/api/auctions/:id/watchlist', auth, (req, res) => { const db = load();
   const i = db.watchlist.findIndex(x => x.userId === req.user.id && x.auctionId === req.params.id);

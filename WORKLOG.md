@@ -120,6 +120,73 @@ actually done and reviewed, in the order it happened.
   server running with the project's real keys — deployment-time
   verification, like the rest of supabase mode.
 
+### 2026-10-14 — Live-site feedback round: AI managers + creator start, player pages, undisclosed bids + withdraw, squad/budget guards, UI polish
+First feedback from playing the live Render site, four features:
+
+- **AI managers + creator start-anytime** (was queued for this codebase;
+  now implemented): world creation accepts `aiFill` (default true,
+  stored on the world, checkbox on the create form). New route
+  `POST /api/worlds/:id/start` — creator only (403 for anyone else,
+  409 once started, 400 if the creator hasn't joined a club or, with
+  aiFill off, fewer than 2 managers). It fills every unclaimed club
+  with an AI manager (manager record flagged `ai:true`, synthetic
+  name/email, random unusable password hash, ₹100 Cr + empty squad
+  exactly like a human; the login route refuses AI accounts) and then
+  starts the world through the scheduler's new `startWorld()` — the
+  same `openAuctions()` path as the scheduled start. Waiting Room
+  shows the creator a gold "▶ Start World Now" panel. In the world
+  tick, AI managers bid during the AUCTION phase under the exact same
+  rules as humans (shared guard, below): ≤2 bids per tick each,
+  highest-rated targets first, modest ~5% increments, never in the
+  final 10 minutes, stopping at a squad + live-leads target of 20;
+  at season start they auto-pick an XI and captain/vice-captain.
+- **Player detail page + bid history + undisclosed bids + withdraw**:
+  new route `GET /api/worlds/:wid/players/:pid` returns the full
+  player (ratings, base price, form/fitness/morale, owner), its
+  auction, and the complete bid history. Clicking a player in the
+  Auction list, Player Database or Squad opens that page in the SPA,
+  with the bid form on it. Bids accept `undisclosed:true` — for
+  everyone except the bidder, that bid's amount and identity are
+  masked (`amount:null`, "Undisclosed"); the auction's current price
+  stays public (you must be able to bid against it) while an
+  undisclosed leader shows as "Undisclosed", and undisclosed bids
+  never leak amount/club into the world event feed. Settlement still
+  uses the real amounts. New route `POST /api/auctions/:id/withdraw`
+  removes the caller's own highest live bid — allowed even when
+  leading — and recomputes leader/price from the remaining bids
+  (400 if the caller has no bid); the caller may bid again.
+- **Squad size + budget guard** (server-side, humans and AI share it
+  via the new `src/bids.js`): squads are 18–25 players. A bid that
+  would add a 26th squad/leading commitment is rejected
+  "Squad is full (max 25 players)."; and a bid is rejected with
+  "Bid too high — you must keep enough budget to complete a minimum
+  18-player squad." when the manager's live commitments plus a
+  reserve (slots still needed to reach 18 × the pool's cheapest base
+  price, ₹0.3 Cr in the IPL pool, computed from the world's own
+  auctions) would exceed their budget — so nobody can blow ₹100 Cr
+  on one player and be unable to field a squad. A raise on an auction
+  you already lead replaces its commitment.
+- **UI/menu polish**: the top tab bar is now a navy left sidebar —
+  club crest block (initials crest, club name, budget) over grouped
+  menu sections (Home / Manage / World) with icons and active-state
+  highlighting for Home/Lobby, Waiting Room, Auction, Player
+  Database (new screen), Squad, Captain & Tactics, Fixtures, League,
+  Finance, News, History and Messages. The Auction screen is a dense
+  Soccer Manager-style table (price, leader incl. Undisclosed,
+  time-left, inline bid + undisclosed tick + watchlist) with a name
+  filter; player rows everywhere are clickable through to the player
+  page. Dark theme kept, gold reserved for primary/creator actions.
+- Tests: suite extended 11 → **18 tests, all passing** (`npm test`):
+  non-creator start 403, creator start below full with AI fill
+  (aiAdded/memberships/budget), double-start 409, undisclosed bid
+  masked for others but visible to the bidder (price stays public),
+  withdraw of the leading bid recomputing leader/price (+ 400 with no
+  bid), budget-guard 400 (₹95 Cr on one player leaves < 18 × ₹0.3 Cr)
+  with a sane bid still accepted, and the 25-player squad cap 400 on
+  a 26th leading bid. Boot smoke (local mode, fast scheduler) also
+  verified live AI bidding on the tick and that AI accounts cannot
+  log in.
+
 ### 2026-10-14 — Free public website: Render blueprint added
 - Hosting decision: Oracle Cloud Always Free is not possible (its
   signup requires a bank card; the user has none). Render free tier
