@@ -5,7 +5,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const path = require('path');
 const crypto = require('crypto');
-const { load, save, id, nowISO, emit, notify, news } = require('./db');
+const { load, save, init, id, nowISO, emit, notify, news } = require('./db');
 const PLAYERS = require('./players');
 const { startScheduler, tick, startWorld } = require('./scheduler');
 const { topBid, validBids, validateBid, placeBid } = require('./bids');
@@ -427,4 +427,11 @@ app.get('/api/server-time', (req, res) => res.json({ serverNow: nowISO() }));
 app.post('/api/admin/tick', (req, res) => { if (req.headers['x-admin-key'] !== SECRET) return res.status(403).json({ error: 'Forbidden' }); tick(); res.json({ ok: true, serverNow: nowISO() }); });
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-app.listen(PORT, () => { console.log(`Cricket Manager Worlds running on http://localhost:${PORT}`); console.log(`[db] mode=${supa.mode()} supabaseConfigured=${supa.isConfigured()} (Supabase is the production backend; 'local' is the dev fallback — see README)`); startScheduler(); });
+// Load the game state before serving: in supabase mode db.init() reads
+// the durable state from public.app_state (falling back to the local
+// file if Supabase is unreachable); in local mode it resolves at once.
+init()
+  .catch(err => console.error('[db] State init failed — continuing with the local store:', err.message))
+  .then(() => {
+    app.listen(PORT, () => { console.log(`Cricket Manager Worlds running on http://localhost:${PORT}`); console.log(`[db] mode=${supa.mode()} supabaseConfigured=${supa.isConfigured()} (Supabase is the production backend; 'local' is the dev fallback — see README)`); startScheduler(); });
+  });

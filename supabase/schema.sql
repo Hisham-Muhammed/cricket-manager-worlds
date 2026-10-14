@@ -299,3 +299,21 @@ create policy "own watchlist" on public.watchlist for all to authenticated
 -- memberships etc.: writes happen only through the Node server using the
 -- service-role key, after server-side validation. Do not add permissive
 -- client write policies for money, ownership, results or auction times.
+
+-- ------------------------------------------------------------- app_state
+-- Durability layer for the game store (src/db.js). In
+-- DATABASE_MODE=supabase the Node server keeps the ENTIRE game state as
+-- one jsonb row here (single row, id = 1): it loads the state from this
+-- table on boot and mirrors every save back, so host restarts and
+-- redeploys never wipe worlds. RLS is enabled with NO policies on
+-- purpose — only the server-side service-role key (which bypasses RLS)
+-- can read or write it; browsers/anon must never touch this table.
+-- This is a durability bridge, not the normalised per-table model
+-- above (that migration remains future work). This block is the
+-- one-time SQL to run in the SQL Editor for existing projects too.
+create table if not exists public.app_state (
+  id         integer primary key,
+  state      jsonb not null,
+  updated_at timestamptz not null default now()
+);
+alter table public.app_state enable row level security;

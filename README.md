@@ -166,7 +166,7 @@ in `src/server.js` / `src/scheduler.js`.
 ├── src/
 │   ├── server.js      # Express API: auth, worlds, join, bids, XI, league
 │   ├── supabase.js    # Supabase service-role client + DATABASE_MODE switch
-│   ├── db.js          # local-dev JSON fallback store (NOT production)
+│   ├── db.js          # game store: JSON file in local mode; mirrored to Supabase app_state in supabase mode
 │   ├── players.js     # real player database seed
 │   ├── fixtures.js    # round-robin schedule generator
 │   ├── matchEngine.js # deterministic simulation from current team state
@@ -198,8 +198,8 @@ when you outgrow them.
    [`supabase/schema.sql`](supabase/schema.sql) and **Run**. This creates
    all tables (`managers`, `worlds`, `clubs`, `memberships`, `players`,
    `world_players`, `auctions`, `bids`, `fixtures`, `league_standings`,
-   `events`, `notifications`, `news`, `watchlist`), indexes, the atomic
-   `place_bid()` function, and the RLS policies.
+   `events`, `notifications`, `news`, `watchlist`, `app_state`), indexes,
+   the atomic `place_bid()` function, and the RLS policies.
 3. Run [`supabase/seed.sql`](supabase/seed.sql) the same way to load the
    real player pool (44 players, same data as `src/players.js`).
 4. **Authentication → Providers:** enable **Email**. For Google sign-in,
@@ -214,6 +214,20 @@ when you outgrow them.
    and set `DATABASE_MODE=supabase`.
 6. Deploy the server (below), open the app, register — then confirm your
    manager row appears in **Table Editor → managers**.
+
+**State durability (supabase mode):** the server mirrors its entire game
+state — worlds, memberships, auctions, bids, fixtures, events — into the
+single-row `public.app_state` table (one jsonb document, `id = 1`) on
+every save, and loads it back on boot. Host restarts and redeploys
+therefore never wipe live worlds. Only the server touches this table,
+with the service-role key (`SUPABASE_SERVICE_ROLE_KEY` must be set in
+the server environment); the table has RLS enabled and deliberately no
+client policies. The one-time SQL for existing projects is the
+`app_state` block at the end of
+[`supabase/schema.sql`](supabase/schema.sql) — run it once in the SQL
+Editor. This is a durability layer, not the normalised per-table
+migration (worlds/auctions as their own rows), which remains future
+work.
 
 ### RLS notes
 `schema.sql` enables Row Level Security on every table. The browser

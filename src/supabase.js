@@ -13,8 +13,11 @@
  * Migration status: step 1 (auth/managers) is DONE — in supabase mode
  * register/login/Google sign-in verify identity with Supabase Auth and
  * the game profile lives in public.managers (see src/server.js). The
- * remaining routes still run on the local store interface in src/db.js,
- * whose collections map 1:1 to the Supabase tables (see README mapping).
+ * remaining routes still run on the store interface in src/db.js,
+ * whose collections map 1:1 to the Supabase tables (see README mapping);
+ * in supabase mode that store is durable — src/db.js mirrors the whole
+ * state to the single-row public.app_state table on every save and
+ * loads it on boot, so restarts/redeploys no longer wipe worlds.
  * To switch a route to Supabase, use getServiceClient() below and the
  * place_bid() Postgres function for atomic bidding; the scheduler must run
  * with the service-role client so auction settlement / match simulation

@@ -187,6 +187,34 @@ First feedback from playing the live Render site, four features:
   verified live AI bidding on the tick and that AI accounts cannot
   log in.
 
+### 2026-10-14 — Supabase durability layer: full game state in public.app_state
+- Problem: in `DATABASE_MODE=supabase` only auth/managers used Supabase;
+  worlds/auctions/everything else still lived in the local JSON file,
+  so every Render restart/redeploy wiped live worlds.
+- Fix (src/db.js): a state-table durability layer. New table
+  `public.app_state` (single row, id = 1, `state` jsonb; RLS enabled
+  with NO policies — only the server's service-role key can touch it;
+  SQL added to supabase/schema.sql). At boot the server awaits
+  `db.init()` before listening: in supabase mode it GETs the app_state
+  row via the service-role REST API and uses its `state` as the store
+  (starting from a fresh default state — persisted once — when no row
+  exists). Every `save()` still writes the local file (now the
+  fallback cache) and mirrors the newest state to app_state with
+  write coalescing (identical snapshots skipped, in-flight snapshots
+  collapsed); SIGTERM/SIGINT flush the final state before exit. If
+  Supabase is unreachable at boot, the server logs it and falls back
+  to the local file instead of crashing; a failed save logs and keeps
+  the state in memory. Local mode is behaviour-identical.
+- Docs: .env.example + README document the layer and the one-time
+  app_state SQL (already in schema.sql for new projects).
+- Scope note: this is a durability layer, NOT the normalised per-table
+  migration — worlds/memberships/auctions as their own Supabase rows
+  (with the atomic `place_bid()`) remains roadmap step 2 future work.
+- Verified: `npm test` 18/18; local-mode boot smoke; and a supabase
+  mode smoke against a local mock of the Supabase REST/Auth endpoints
+  — register + create world, restart the server, world still there
+  (loaded from app_state), again across a second restart.
+
 ### 2026-10-14 — Free public website: Render blueprint added
 - Hosting decision: Oracle Cloud Always Free is not possible (its
   signup requires a bank card; the user has none). Render free tier
