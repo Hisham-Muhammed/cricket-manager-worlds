@@ -57,32 +57,68 @@ function sign(u) { return jwt.sign({ uid: u.id }, SECRET, { expiresIn: '30d' });
 // back to the local store, exactly as before.
 const SUPA_AUTH = supa.mode() === 'supabase' && supa.isConfigured() && !!supa.getAnonClient();
 const managerToUser = m => ({ id: m.id, authUserId: m.auth_user_id, name: m.name, email: m.email, provider: m.provider,
+  // Only OTP-flow registrations start unverified; every pre-existing /
+  // Google / lazily-created profile counts as verified (never lock out).
+  emailVerified: m.email_verified !== false,
   profileImage: m.profile_image || '', stats: m.stats, trophies: m.trophies, history: m.history, createdAt: m.created_at });
 async function getManagerById(admin, managerId) {
   const { data } = await admin.from('managers').select('*').eq('id', managerId).maybeSingle();
   return data || null;
 }
 async function ensureManager(admin, authUser, provider) {
+  const prov = provider || (authUser.app_metadata && authUser.app_metadata.provider) || 'email';
   const { data: linked } = await admin.from('managers').select('*').eq('auth_user_id', authUser.id).maybeSingle();
-  if (linked) return linked;
+  if (linked) {
+    // Google sign-in proves control of the inbox: an address that
+    // registered by email but never finished OTP verification counts
+    // as verified from here.
+    if (prov === 'google' && linked.email_verified === false) {
+      const { data } = await admin.from('managers').update({ email_verified: true }).eq('id', linked.id).select('*').single();
+      if (data) return data;
+    }
+    return linked;
+  }
   const email = authUser.email;
   if (email) {
     const { data: byEmail } = await admin.from('managers').select('*').eq('email', email).maybeSingle();
     if (byEmail) { // link an existing profile to this auth identity
-      const { data, error } = await admin.from('managers').update({ auth_user_id: authUser.id }).eq('id', byEmail.id).select('*').single();
+      const patch = { auth_user_id: authUser.id };
+      if (prov === 'google') patch.email_verified = true; // Google verified the inbox
+      const { data, error } = await admin.from('managers').update(patch).eq('id', byEmail.id).select('*').single();
       if (error) throw error;
       return data;
     }
   }
   const meta = authUser.user_metadata || {};
+  // Profiles born here are verified by construction: Google identities
+  // arrive pre-verified, and an email profile is only created lazily
+  // for an auth user Supabase has already accepted. The OTP register
+  // flow is the one place that inserts email_verified:false.
   const { data, error } = await admin.from('managers').insert({
     auth_user_id: authUser.id, name: meta.name || meta.full_name || email, email,
-    provider: provider || (authUser.app_metadata && authUser.app_metadata.provider) || 'email',
+    provider: prov, email_verified: true,
     profile_image: meta.picture || meta.avatar_url || ''
   }).select('*').single();
   if (error) throw error;
   return data;
 }
+// Ask Supabase Auth to email a 6-digit OTP code (POST /auth/v1/otp).
+// The code is generated, mailed and later checked entirely by Supabase
+// Auth — the app never sees or stores it; the only OTP state we keep
+// is managers.email_verified. Best-effort: returns whether Supabase
+// accepted the send; callers decide whether a failure matters (a
+// register still succeeds — the code can be resent).
+async function sendOtpEmail(email) {
+  try {
+    const anon = supa.getAnonClient();
+    if (!anon) return false;
+    const { error } = await anon.auth.signInWithOtp({ email, options: { shouldCreateUser: false } });
+    return !error;
+  } catch { return false; }
+}
+// Supabase's "email not confirmed" refusal at password sign-in (sent
+// when the project has "Confirm email" ON and the address is unverified).
+const isUnconfirmedError = e => !!e && (/not confirmed/i.test(e.message || '') || /email_not_confirmed/i.test(String(e.code || '')));
 async function auth(req, res, next) {
   const t = req.cookies.token || (req.headers.authorization || '').replace('Bearer ', '');
   if (!t) return res.status(401).json({ error: 'Not logged in.' });
@@ -100,7 +136,7 @@ async function auth(req, res, next) {
   } catch { return res.status(503).json({ error: 'Auth service unavailable.' }); }
   next();
 }
-const pubUser = (db, u) => ({ id: u.id, name: u.name, email: u.email, provider: u.provider, profileImage: u.profileImage || '',
+const pubUser = (db, u) => ({ id: u.id, name: u.name, email: u.email, provider: u.provider, emailVerified: u.emailVerified !== false, profileImage: u.profileImage || '',
   joinedWorlds: db.memberships.filter(m => m.userId === u.id).map(m => m.worldId),
   createdWorlds: db.worlds.filter(w => w.creatorId === u.id).map(w => w.id),
   currentClub: (db.memberships.find(m => m.userId === u.id) || {}).clubName || null,
@@ -119,21 +155,45 @@ app.post('/api/auth/register', async (req, res) => {
   const { name, email, password } = req.body || {};
   if (!name || !email || !password || password.length < 6) return res.status(400).json({ error: 'Name, email and a 6+ character password are required.' });
   if (SUPA_AUTH) {
+    // Email OTP confirmation — registration is two-step. The Supabase
+    // Auth user + managers profile are created with email_verified =
+    // false, Supabase emails a 6-digit code, and NO app session is
+    // issued until POST /api/auth/verify-otp proves the caller controls
+    // the inbox. (Reported problem this fixes: anyone could register
+    // with a random Gmail and use the account immediately.)
     try {
       const admin = supa.getServiceClient();
       const normEmail = String(email).toLowerCase();
-      const { data: existing } = await admin.from('managers').select('id').eq('email', normEmail).maybeSingle();
-      if (existing) return res.status(409).json({ error: 'An account with this email already exists.' });
-      const { data: created, error } = await admin.auth.admin.createUser({ email: normEmail, password, email_confirm: true, user_metadata: { name } });
-      if (error) {
-        if (/already|exists|registered/i.test(error.message || '')) return res.status(409).json({ error: 'An account with this email already exists.' });
-        return res.status(502).json({ error: 'Could not create the account. Please try again.' });
+      const { data: existing } = await admin.from('managers').select('*').eq('email', normEmail).maybeSingle();
+      if (existing && existing.email_verified !== false)
+        return res.status(409).json({ error: 'Account already exists — please log in.' });
+      if (existing) {
+        // Re-registering an address that never finished verification:
+        // refresh the password/name on the existing auth user (or create
+        // the auth user if the profile somehow has none), then fall
+        // through to a fresh code.
+        if (existing.auth_user_id) {
+          const { error: upErr } = await admin.auth.admin.updateUserById(existing.auth_user_id,
+            { password, user_metadata: { name } });
+          if (upErr) return res.status(502).json({ error: 'Could not create the account. Please try again.' });
+        } else {
+          const { data: created, error } = await admin.auth.admin.createUser({ email: normEmail, password, email_confirm: false, user_metadata: { name } });
+          if (error) return res.status(502).json({ error: 'Could not create the account. Please try again.' });
+          await admin.from('managers').update({ auth_user_id: created.user.id }).eq('id', existing.id);
+        }
+        await admin.from('managers').update({ name }).eq('id', existing.id);
+      } else {
+        const { data: created, error } = await admin.auth.admin.createUser({ email: normEmail, password, email_confirm: false, user_metadata: { name } });
+        if (error) {
+          if (/already|exists|registered/i.test(error.message || '')) return res.status(409).json({ error: 'Account already exists — please log in.' });
+          return res.status(502).json({ error: 'Could not create the account. Please try again.' });
+        }
+        const { error: insErr } = await admin.from('managers')
+          .insert({ auth_user_id: created.user.id, name, email: normEmail, provider: 'email', email_verified: false }).select('*').single();
+        if (insErr) return res.status(502).json({ error: 'Could not create the account. Please try again.' });
       }
-      const { data: m, error: insErr } = await admin.from('managers')
-        .insert({ auth_user_id: created.user.id, name, email: normEmail, provider: 'email' }).select('*').single();
-      if (insErr) return res.status(502).json({ error: 'Could not create the account. Please try again.' });
-      const u = managerToUser(m);
-      return res.cookie('token', sign(u), COOKIE_OPTS).json({ user: pubUser(load(), u), serverNow: nowISO() });
+      await sendOtpEmail(normEmail); // best-effort — Resend covers a failed send
+      return res.status(201).json({ needsOtp: true, email: normEmail });
     } catch { return res.status(503).json({ error: 'Auth service unavailable.' }); }
   }
   const db = load();
@@ -148,9 +208,27 @@ app.post('/api/auth/login', async (req, res) => {
   if (SUPA_AUTH) {
     try {
       const anon = supa.getAnonClient();
-      const { data, error } = await anon.auth.signInWithPassword({ email: String(email || ''), password: password || '' });
-      if (error || !data || !data.user) return res.status(401).json({ error: 'Invalid email or password.' });
+      const normEmail = String(email || '').toLowerCase();
+      const { data, error } = await anon.auth.signInWithPassword({ email: normEmail, password: password || '' });
+      if (error || !data || !data.user) {
+        // With "Confirm email" ON, Supabase refuses password sign-in
+        // for an unverified address before our own flag can be checked
+        // — route that case to the OTP screen with a fresh code rather
+        // than a misleading 401.
+        if (isUnconfirmedError(error)) {
+          await sendOtpEmail(normEmail);
+          return res.status(403).json({ needsOtp: true, email: normEmail });
+        }
+        return res.status(401).json({ error: 'Invalid email or password.' });
+      }
       const m = await ensureManager(supa.getServiceClient(), data.user, 'email');
+      if (m.email_verified === false) {
+        // Password is right but the inbox was never proven (reachable
+        // when the project has "Confirm email" off, so Supabase let the
+        // sign-in through): hold the session until the OTP is verified.
+        await sendOtpEmail(normEmail);
+        return res.status(403).json({ needsOtp: true, email: normEmail });
+      }
       const u = managerToUser(m);
       return res.cookie('token', sign(u), COOKIE_OPTS).json({ user: pubUser(load(), u), serverNow: nowISO() });
     } catch { return res.status(503).json({ error: 'Auth service unavailable.' }); }
@@ -159,6 +237,43 @@ app.post('/api/auth/login', async (req, res) => {
   const u = db.users.find(x => x.email.toLowerCase() === String(email || '').toLowerCase());
   if (!u || u.ai || !u.passwordHash || !bcrypt.compareSync(password || '', u.passwordHash)) return res.status(401).json({ error: 'Invalid email or password.' }); // AI managers can never sign in
   res.cookie('token', sign(u), COOKIE_OPTS).json({ user: pubUser(db, u), serverNow: nowISO() });
+});
+app.post('/api/auth/verify-otp', async (req, res) => {
+  // Supabase mode only (local mode has no OTP — registration there is
+  // single-step dev behaviour). Supabase checks the code itself
+  // (POST /auth/v1/verify, type "email"); only on success do we flip
+  // managers.email_verified and issue the normal app session.
+  if (!SUPA_AUTH) return res.status(404).json({ error: 'Not available in local mode.' });
+  const email = String((req.body || {}).email || '').toLowerCase();
+  const code = String((req.body || {}).code || '').trim();
+  if (!email || !code) return res.status(400).json({ error: 'Email and code are required.' });
+  try {
+    const anon = supa.getAnonClient();
+    const { data, error } = await anon.auth.verifyOtp({ email, token: code, type: 'email' });
+    if (error || !data || !data.user) return res.status(401).json({ error: 'Invalid or expired code.' });
+    const admin = supa.getServiceClient();
+    let m = await ensureManager(admin, data.user, 'email');
+    if (m.email_verified !== true) {
+      const { data: upd } = await admin.from('managers').update({ email_verified: true }).eq('id', m.id).select('*').single();
+      if (upd) m = upd;
+    }
+    const u = managerToUser(m);
+    return res.cookie('token', sign(u), COOKIE_OPTS).json({ user: pubUser(load(), u), serverNow: nowISO() });
+  } catch { return res.status(503).json({ error: 'Auth service unavailable.' }); }
+});
+app.post('/api/auth/resend-otp', async (req, res) => {
+  // Always the same generic 200 — never reveal whether the account
+  // exists or is already verified (no account enumeration). A fresh
+  // code is actually sent only for a known, still-unverified profile.
+  const email = String((req.body || {}).email || '').toLowerCase();
+  if (SUPA_AUTH && email) {
+    try {
+      const admin = supa.getServiceClient();
+      const { data: m } = await admin.from('managers').select('id,email_verified').eq('email', email).maybeSingle();
+      if (m && m.email_verified === false) await sendOtpEmail(email);
+    } catch { /* the generic response stands regardless */ }
+  }
+  return res.json({ ok: true });
 });
 app.post('/api/auth/logout', (req, res) => res.clearCookie('token', { path: '/' }).json({ ok: true }));
 app.get('/api/auth/me', auth, (req, res) => { const db = load();
