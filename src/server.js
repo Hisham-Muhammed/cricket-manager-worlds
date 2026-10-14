@@ -14,6 +14,7 @@ let PHOTOS = {};
 try { PHOTOS = require('./photos.json'); } catch { PHOTOS = {}; }
 const { startScheduler, tick, startWorld } = require('./scheduler');
 const { topBid, validBids, validateBid, placeBid } = require('./bids');
+const { createOffer, applyAccept, closeOffer, offerView } = require('./offers');
 const { defaultTactics, withDefaults, validateTactics, PITCHES } = require('./tactics');
 const { fixturePitch } = require('./matchEngine');
 const supa = require('./supabase');
@@ -217,6 +218,7 @@ const pubWorld = (db, w, userId) => ({ id: w.id, name: w.name, description: w.de
   startDate: w.startDate, auctionStartAt: w.auctionStartAt, seasonStartAt: w.seasonStartAt, format: w.format,
   competitionStructure: w.competitionStructure, matchIntervalDays: w.matchIntervalDays, matchTime: w.matchTime,
   timezone: w.timezone, seasonLength: w.seasonLength, isPrivate: !!w.passwordHash, aiFill: w.aiFill !== false,
+  squadMode: w.squadMode === 'draft' ? 'draft' : 'auction', // World Mode 2: 'auction' (default) or 'draft'
   joined: userId ? !!memberOf(db, w.id, userId) : false, serverNow: nowISO() });
 
 app.get('/api/worlds', auth, (req, res) => { const db = load(); res.json({ worlds: db.worlds.map(w => pubWorld(db, w, req.user.id)), serverNow: nowISO() }); });
@@ -235,6 +237,7 @@ app.post('/api/worlds', auth, (req, res) => {
     seasonStartAt: (b.seasonStartAt ? new Date(b.seasonStartAt) : new Date(start.getTime() + 4 * 24 * 3600 * 1000)).toISOString(),
     passwordHash: b.password ? bcrypt.hashSync(b.password, 12) : null, // hashed, never returned
     aiFill: b.aiFill !== false, // empty clubs are filled with AI managers when the creator starts the world
+    squadMode: b.squadMode === 'draft' ? 'draft' : 'auction', // auction = empty squads + bidding; draft = squads distributed equally
     state: 'RECRUITING', createdAt: nowISO() };
   db.worlds.push(w); emit(db, w.id, 'WORLD_CREATED', { name: w.name }); save();
   res.status(201).json({ world: pubWorld(db, w, req.user.id) });
@@ -364,7 +367,7 @@ app.get('/api/worlds/:wid/players/:pid', auth, (req, res) => { const db = load()
       nationality: t.nationality, rating: t.rating, batting: t.batting, bowling: t.bowling, leadership: t.leadership,
       prefBatPos: t.prefBatPos, prefOvers: t.prefOvers, approach: t.approach, ...photoFields(t),
       baseValue: t.baseValue, form: wp.form, fitness: wp.fitness, morale: wp.morale, status: wp.status,
-      ownerClub: owner ? owner.clubName : null },
+      ownerClub: owner ? owner.clubName : null, ownerMembershipId: owner ? owner.id : null },
     auction: auction ? auctionView(db, auction, mine && mine.id, req.user.id) : null,
     bids: history, myMembership: mine || null, serverNow: nowISO() }); });
 
@@ -481,6 +484,67 @@ app.post('/api/worlds/:id/fixtures/:fid/pitch', auth, (req, res) => { const db =
   f.pitch = pitch;
   emit(db, m.worldId, 'PITCH_CHANGED', { club: m.clubName, pitch, fixtureId: f.id });
   save(); res.json({ fixtureId: f.id, pitch }); });
+
+// ---------- transfer market (manager-to-manager offers) ----------
+// Works in both squad modes once squads exist. Creation only validates
+// and records the offer; acceptance re-validates everything (funds,
+// squad bounds 18–25, ownership) and applies the exchange atomically
+// (see src/offers.js). Offers expire after 72h (scheduler tick).
+app.post('/api/worlds/:id/offers', auth, (req, res) => {
+  const db = load(); const w = db.worlds.find(x => x.id === req.params.id);
+  if (!w) return res.status(404).json({ error: 'World not found.' });
+  const mine = memberOf(db, w.id, req.user.id);
+  if (!mine) return res.status(403).json({ error: 'Not a member of this world.' });
+  const r = createOffer(db, w, mine, req.body || {});
+  if (r.error) return res.status(r.status).json({ error: r.error });
+  save(); res.status(201).json({ offer: offerView(db, r.offer, mine.id), serverNow: nowISO() });
+});
+app.get('/api/worlds/:id/offers', auth, (req, res) => {
+  const db = load(); const w = db.worlds.find(x => x.id === req.params.id);
+  if (!w) return res.status(404).json({ error: 'World not found.' });
+  const mine = memberOf(db, w.id, req.user.id);
+  if (!mine) return res.status(403).json({ error: 'Not a member of this world.' });
+  const playersByOwner = {};
+  for (const p of db.worldPlayers.filter(p => p.worldId === w.id && p.ownerMembershipId)) {
+    const t = tpl(p);
+    (playersByOwner[p.ownerMembershipId] = playersByOwner[p.ownerMembershipId] || [])
+      .push({ worldPlayerId: p.id, name: t.name, role: t.role, rating: t.rating, baseValue: t.baseValue });
+  }
+  Object.values(playersByOwner).forEach(l => l.sort((a, b) => b.rating - a.rating));
+  const offers = db.offers.filter(o => o.worldId === w.id && (o.fromMembershipId === mine.id || o.toMembershipId === mine.id))
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).map(o => offerView(db, o, mine.id));
+  res.json({ offers, myMembershipId: mine.id,
+    members: db.memberships.filter(m => m.worldId === w.id).map(m => ({ id: m.id, clubName: m.clubName,
+      managerName: (db.users.find(u => u.id === m.userId) || {}).name || '', ai: !!m.ai, mine: m.id === mine.id })),
+    playersByOwner, serverNow: nowISO() });
+});
+app.post('/api/offers/:id/accept', auth, (req, res) => {
+  const db = load(); const o = db.offers.find(x => x.id === req.params.id);
+  if (!o) return res.status(404).json({ error: 'Offer not found.' });
+  const seller = db.memberships.find(m => m.id === o.toMembershipId);
+  if (!seller || seller.userId !== req.user.id) return res.status(403).json({ error: 'Only the selling club can accept this offer.' });
+  const r = applyAccept(db, o); // re-validates; on failure nothing moves
+  if (!r.ok) { save(); return res.status(r.status).json({ error: r.error }); }
+  save(); res.json({ offer: offerView(db, o, seller.id), serverNow: nowISO() });
+});
+app.post('/api/offers/:id/reject', auth, (req, res) => {
+  const db = load(); const o = db.offers.find(x => x.id === req.params.id);
+  if (!o) return res.status(404).json({ error: 'Offer not found.' });
+  const seller = db.memberships.find(m => m.id === o.toMembershipId);
+  if (!seller || seller.userId !== req.user.id) return res.status(403).json({ error: 'Only the selling club can reject this offer.' });
+  if (o.status !== 'PENDING') return res.status(409).json({ error: 'This offer is no longer pending.' });
+  closeOffer(db, o, 'REJECTED'); save();
+  res.json({ offer: offerView(db, o, seller.id), serverNow: nowISO() });
+});
+app.post('/api/offers/:id/withdraw', auth, (req, res) => {
+  const db = load(); const o = db.offers.find(x => x.id === req.params.id);
+  if (!o) return res.status(404).json({ error: 'Offer not found.' });
+  const buyer = db.memberships.find(m => m.id === o.fromMembershipId);
+  if (!buyer || buyer.userId !== req.user.id) return res.status(403).json({ error: 'Only the buying club can withdraw this offer.' });
+  if (o.status !== 'PENDING') return res.status(409).json({ error: 'This offer is no longer pending.' });
+  closeOffer(db, o, 'WITHDRAWN'); save();
+  res.json({ offer: offerView(db, o, buyer.id), serverNow: nowISO() });
+});
 
 // ---------- fixtures / league / misc ----------
 app.get('/api/worlds/:id/fixtures', auth, (req, res) => { const db = load();
