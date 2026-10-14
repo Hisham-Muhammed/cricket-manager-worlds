@@ -11,6 +11,7 @@ const { load, save, id, nowISO, emit, notify, news } = require('./db');
 const PLAYERS = require('./players');
 const { generateFixtures } = require('./fixtures');
 const { simulate } = require('./matchEngine');
+const { withDefaults, buildAutoBowlingPlan } = require('./tactics');
 const { AI_SQUAD_TARGET, topBid, validBids, squadCount, leadingList, validateBid, placeBid } = require('./bids');
 // Share of its budget an AI may have committed to NEW fronts. The rest
 // is a war-chest, kept free so the AI can always defend its targets.
@@ -116,7 +117,13 @@ function aiTakeTurn(db, world) {
   return changed;
 }
 
-/** AI managers pick a playing XI + captain/vice-captain from what they won. */
+/**
+ * AI managers pick a playing XI + captain/vice-captain from what they
+ * won, and set sensible detailed tactics: a batting order that follows
+ * each player's preferred position, a 20-over bowling plan built from
+ * bowling ratings and preferred phases, each player's default approach,
+ * and a standing home pitch (fixed per club, varied across clubs).
+ */
 function aiPickTeams(db, world) {
   db.memberships.filter(m => m.worldId === world.id && m.ai).forEach(m => {
     const owned = db.worldPlayers.filter(p => p.worldId === world.id && p.ownerMembershipId === m.id)
@@ -126,6 +133,17 @@ function aiPickTeams(db, world) {
     const byLeadership = [...owned].sort((a, b) => (b.t.leadership || 0) - (a.t.leadership || 0));
     if (byLeadership[0]) m.captainId = byLeadership[0].p.id;
     if (byLeadership[1]) m.viceCaptainId = byLeadership[1].p.id;
+    const xiMerged = m.xi.map(pid => { const o = owned.find(x => x.p.id === pid); return o ? { ...o.t, ...o.p } : null; }).filter(Boolean);
+    const battingOrder = [...xiMerged]
+      .sort((a, b) => (a.prefBatPos || 11) - (b.prefBatPos || 11) || (b.batting || 0) - (a.batting || 0))
+      .map(p => p.id);
+    const playerApproach = {};
+    xiMerged.forEach(p => { playerApproach[p.id] = p.approach || 'balanced'; });
+    const pitchPick = ['batting', 'balanced', 'bowling', 'balanced'][[...m.clubName].reduce((s, c) => s + c.charCodeAt(0), 0) % 4];
+    const prev = m.tactics || {};
+    m.tactics = { ...withDefaults(prev),
+      battingOrder, bowlingPlan: buildAutoBowlingPlan(xiMerged), playerApproach,
+      homePitch: prev.homePitch || pitchPick };
   });
 }
 
@@ -184,6 +202,14 @@ function applyResult(db, world, fixture, result) {
   for (const mid of [fixture.homeMembershipId, fixture.awayMembershipId])
     db.worldPlayers.filter(p => p.worldId === world.id && p.ownerMembershipId === mid)
       .forEach(p => { p.fitness = Math.max(60, (p.fitness ?? 100) - 4); p.form = Math.min(99, Math.max(20, (p.form ?? 50) + (result.winnerMembershipId === mid ? 5 : -2))); });
+  // Tactics fit: players used in their preferred position/phases gain
+  // morale; misused players lose morale and form (see matchEngine).
+  for (const e of (result && result.moraleEffects) || []) {
+    const p = db.worldPlayers.find(x => x.id === e.worldPlayerId && x.worldId === world.id);
+    if (!p) continue;
+    p.morale = Math.min(99, Math.max(10, (p.morale ?? 70) + (e.moraleDelta || 0)));
+    p.form = Math.min(99, Math.max(20, (p.form ?? 50) + (e.formDelta || 0)));
+  }
 }
 
 function tick() {
@@ -242,4 +268,4 @@ function startScheduler() {
   setInterval(() => { try { tick(); } catch (e) { console.error('[scheduler]', e); } }, ms);
   console.log(`[scheduler] ticking every ${ms}ms (server time is source of truth)`);
 }
-module.exports = { tick, startScheduler, settleAuction, openAuctions, startWorld, AI_WARCHEST_FRACTION };
+module.exports = { tick, startScheduler, settleAuction, openAuctions, startWorld, aiPickTeams, AI_WARCHEST_FRACTION };
