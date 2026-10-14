@@ -14,7 +14,7 @@
   "main": "src/server.js",
   "name": "cricket-manager-worlds",
   "scripts": {
-    "test": "node --test test/api.test.js",
+    "test": "node --test \"test/*.test.js\"",
     "check": "node --check src/server.js && node --check src/db.js && node --check src/supabase.js && node --check src/scheduler.js && node --check src/matchEngine.js && node --check src/bids.js && node --check src/tactics.js && node --check src/offers.js && node --check public/app.js",
     "dev": "node --watch src/server.js",
     "start": "node src/server.js"

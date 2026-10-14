@@ -479,3 +479,70 @@ First feedback from playing the live Render site, four features:
   pass (measured spreads above show it lands far inside tolerance);
   unassigned pool players in draft mode simply remain in the central
   market (no auctions exist to sell them through).
+
+### 2026-10-14 — Email OTP confirmation for accounts (supabase mode)
+- Problem reported from the live site: anyone could register with a
+  random Gmail address and use the account immediately — no proof
+  they controlled the inbox. Email+password registration in supabase
+  mode is now two-step:
+  - `POST /api/auth/register` creates the Supabase Auth user
+    (`email_confirm: false`) + the managers profile with
+    `email_verified = false`, asks Supabase to email a 6-digit code
+    (POST /auth/v1/otp via `signInWithOtp`, `shouldCreateUser:false`)
+    and returns **201 `{ needsOtp: true, email }` — no session
+    cookie**. Verified duplicate → 409 "Account already exists —
+    please log in." An existing-but-unverified address is treated as
+    a re-register: password/name refreshed on the auth user, fresh
+    code sent, still 201.
+  - `POST /api/auth/verify-otp { email, code }` checks the code with
+    Supabase (POST /auth/v1/verify, type "email"). Wrong/expired →
+    401 "Invalid or expired code." On success it flips
+    `managers.email_verified` to true and issues the normal app
+    session cookie.
+  - `POST /api/auth/resend-otp { email }` always returns the same
+    generic 200 `{ ok: true }` (no account enumeration); a fresh code
+    is actually sent only for a known, still-unverified profile.
+  - **Login gate**: `POST /api/auth/login` issues no session while
+    the profile is unverified — it returns 403 `{ needsOtp: true,
+    email }` and triggers a fresh code. Both layers are covered:
+    Supabase's own "Email not confirmed" refusal (project with
+    "Confirm email" ON) is mapped to the same 403, and the profile
+    flag is checked after a successful password sign-in (project
+    with confirmation OFF).
+  - The code itself is generated, mailed and verified entirely by
+    Supabase Auth — the app stores nothing OTP-related anywhere; the
+    only state is the `email_verified` boolean on the managers
+    profile (new schema column, `default true`, so pre-existing and
+    Google profiles are never locked out; Google sign-in marks a
+    profile verified, since Google already proved the inbox).
+  - **Local mode unchanged** (single-step dev registration; the two
+    new routes answer 404 / generic 200 there), response shapes kept
+    consistent where free.
+  - SPA: after register or a 403-needsOtp login, the auth card swaps
+    to an OTP screen (6-digit code input, Verify, Resend, Back to
+    Sign In, clear error/info lines); success goes to the lobby.
+- Tests: suite extended 38 → **48 tests, all passing** (`npm test`,
+  `npm run check` clean). New `test/otp.test.js` boots the real
+  server in supabase mode against an in-process mock of the Supabase
+  GoTrue + PostgREST endpoints (the stubbing approach of the earlier
+  supabase smokes; `npm test` now runs `test/*.test.js`). It pins:
+  register → 201 needsOtp + no cookie + profile unverified + code
+  issued; login gated 403 via BOTH layers; wrong code 401 with
+  nothing changed; right code → session + flag flipped + /me works;
+  login after verification 200; verified duplicate 409; unverified
+  re-register refreshes the password (old 401 / new 200); resend
+  generic for unknown + verified, re-issues for unverified;
+  Google-created profile verified by default with an immediate
+  session.
+- ⚠️ **REQUIRED manual dashboard step before this works live**:
+  Supabase → Authentication → Providers → Email → **"Confirm email"
+  must be ON**, otherwise Supabase will not send real OTP/confirmation
+  emails (and for the emailed code to be usable as a 6-digit OTP, the
+  "Magic Link" / confirmation email template must contain
+  `{{ .Token }}`). Also run the one-line ALTER from schema.sql on
+  the live project if `public.managers.email_verified` does not exist
+  yet: `alter table public.managers add column if not exists
+  email_verified boolean not null default true;`. Note Supabase's
+  built-in mailer is rate-limited — a custom SMTP (e.g. Resend) is
+  the follow-up if real sign-up volume arrives. Not yet deployed:
+  code + tests are local, pending push and the dashboard step.
