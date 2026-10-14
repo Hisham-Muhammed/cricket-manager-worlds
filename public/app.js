@@ -1,5 +1,7 @@
 'use strict';
 let me=null, worldId=null, tab='Lobby', playerPid=null, backTab='Auction', aucCache=null, sideCache=null;
+// transfer market screen state: selected target club + a prefill from the player page
+let trClub=null, trPrefill=null;
 let focusPid=null, squadCache=null, squadSel=null;
 const $=s=>document.querySelector(s), esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 async function api(p,o={}){const r=await fetch(p,{headers:{'Content-Type':'application/json'},...o});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||r.status);return d;}
@@ -78,7 +80,8 @@ const IC={
  coin:'<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><text x="12" y="16" text-anchor="middle" font-size="10.5" fill="currentColor" stroke="none" font-weight="700">₹</text></svg>',
  news:'<svg viewBox="0 0 24 24"><path d="M4 5h13v14H6.5A2.5 2.5 0 0 1 4 16.5z"/><path d="M17 9h3.2v7.5a2.5 2.5 0 0 1-2.5 2.5"/><path d="M7.5 9h6.5M7.5 13h6.5"/></svg>',
  clock:'<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3.2 2"/></svg>',
- mail:'<svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3.8 7.2 8.2 5.8 8.2-5.8"/></svg>'};
+ mail:'<svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3.8 7.2 8.2 5.8 8.2-5.8"/></svg>',
+ swap:'<svg viewBox="0 0 24 24"><path d="M4 7.5h13.5"/><path d="M14.5 4 18 7.5 14.5 11"/><path d="M20 16.5H6.5"/><path d="M9.5 13 6 16.5 9.5 20"/></svg>'};
 const MENU=[
  {sec:'Home'},
  {key:'Home',icon:'home',label:'Home',worldOnly:true},
@@ -88,6 +91,7 @@ const MENU=[
  {key:'Auction',icon:'gavel',label:'Auction'},
  {key:'Players',icon:'book',label:'Player Database'},
  {key:'Squad',icon:'users',label:'Squad'},
+ {key:'Transfers',icon:'swap',label:'Transfers & Offers',worldOnly:true},
  {key:'Tactics',icon:'target',label:'Captain & Tactics'},
  {sec:'World'},
  {key:'Fixtures',icon:'cal',label:'Fixtures'},
@@ -172,7 +176,7 @@ async function render(){saveNav();const v=$('#view');$('#err').textContent='';re
  try{
   if(tab==='Lobby'){const d=await api('/api/worlds');
    v.innerHTML=`<div class="panel"><h2>Game World Lobby</h2><div class="tblwrap"><table><tr><th>World</th><th>Creator</th><th>Managers</th><th>Status</th><th>Start</th><th>Format</th><th></th></tr>
-   ${d.worlds.map(w=>`<tr><td><b>${esc(w.name)}</b> ${w.isPrivate?'<span class="lock">🔒 Private</span>':''} ${w.aiFill?'🤖':''}</td><td>${esc(w.creatorName)}</td><td>${w.managersCount}/${w.numberOfClubs}</td><td><span class="pill">${esc(w.state)}</span></td><td>${new Date(w.startDate).toLocaleString()}</td><td>${esc(w.format)}</td><td><button onclick="openWorld('${w.id}')">View / Join</button></td></tr>`).join('')}</table></div></div>
+   ${d.worlds.map(w=>`<tr><td><b>${esc(w.name)}</b> ${w.isPrivate?'<span class="lock">🔒 Private</span>':''} ${w.aiFill?'🤖':''} ${w.squadMode==='draft'?'<span class="pill">⚖️ Draft</span>':''}</td><td>${esc(w.creatorName)}</td><td>${w.managersCount}/${w.numberOfClubs}</td><td><span class="pill">${esc(w.state)}</span></td><td>${new Date(w.startDate).toLocaleString()}</td><td>${esc(w.format)}</td><td><button onclick="openWorld('${w.id}')">View / Join</button></td></tr>`).join('')}</table></div></div>
    <div class="panel"><h3>Create World</h3>
    <div class="formgrid">
    <span><label>World name</label><input id="wname" placeholder="World name"></span>
@@ -185,6 +189,7 @@ async function render(){saveNav();const v=$('#view');$('#err').textContent='';re
    <span><label>Auction start</label><input id="wauc" type="datetime-local"></span>
    <span><label>Season start</label><input id="wseason" type="datetime-local"></span>
    <span><label>World password (optional — stored hashed, never shown)</label><input id="wpass" type="password"></span>
+   <span><label>Squad mode</label><select id="wmode"><option value="auction">Auction — empty squads, bid for players</option><option value="draft">Draft — squads distributed equally, then trade</option></select></span>
    </div>
    <label class="chk"><input type="checkbox" id="waifill" checked> Fill empty clubs with AI managers (world can be started any time)</label><br>
    <button class="goldbtn" onclick="createWorld()">Create World</button></div>`;}
@@ -220,7 +225,7 @@ async function render(){saveNav();const v=$('#view');$('#err').textContent='';re
   else if(tab==='Waiting Room'){const d=await api('/api/worlds/'+worldId);const w=d.world;const canStart=w.creatorId===me.id&&['CREATED','RECRUITING'].includes(w.state);
    v.innerHTML=`<div class="panel"><h2>World Waiting Room — ${esc(w.name)}</h2><p>Status: <span class="pill">${esc(w.state)}</span> · Managers: ${w.managersCount}/${w.numberOfClubs} · Server time: ${new Date(d.serverNow).toLocaleString()}</p>
    <p>World start: ${new Date(w.startDate).toLocaleString()} · Auction: ${new Date(w.auctionStartAt).toLocaleString()} · Season: ${new Date(w.seasonStartAt).toLocaleString()}</p>
-   <p>Rules: Squads start <b>empty</b>, budget ₹100 Cr each, squads of 18–25 players, 24-hour auctions, matches every ${w.matchIntervalDays} days at ${esc(w.matchTime)} (${esc(w.timezone)}), no Play Match button — fixtures auto-simulate at their scheduled server time.</p>
+   <p>Rules: ${w.squadMode==='draft'?'Squads are <b>distributed equally</b> when the world starts (20 players per club, balanced by rating and role) — no auction; trade with other clubs afterwards in Transfers &amp; Offers.':'Squads start <b>empty</b>, 24-hour auctions,'} budget ₹100 Cr each, squads of 18–25 players, matches every ${w.matchIntervalDays} days at ${esc(w.matchTime)} (${esc(w.timezone)}), no Play Match button — fixtures auto-simulate at their scheduled server time.</p>
    <h3>Joined managers</h3><div class="members">${d.members.map(m=>`<div class="member">${crestHTML(m.clubName,'sm')}<span><div class="mclub">${esc(m.clubName)}</div><div class="mmgr">${esc(m.managerName)}${m.ai?' <span class="aitag">🤖 AI</span>':''}</div></span></div>`).join('')||'<p>None yet</p>'}</div>
    ${d.myMembership?'':`<h3 style="margin-top:14px">Select your club</h3><div class="clubpick">${d.availableClubs.map(c=>`<label><input type="radio" name="club" value="${esc(c)}">${crestHTML(c,'sm')} ${esc(c)}</label>`).join('')}</div>
    ${w.isPrivate?'<label>World password</label><input id="jpass" type="password">':''}<button class="goldbtn" onclick="joinWorld()">Join World</button>`}</div>
@@ -270,7 +275,7 @@ async function render(){saveNav();const v=$('#view');$('#err').textContent='';re
    v.innerHTML=`<div class="panel"><button class="secondary" onclick="go('${backTab}')">← Back</button>
    <div class="phead" style="margin-top:12px"><div style="width:190px;flex:none"><div class="pcard-img">${avatarHTML(p,'lg')}<span class="ovr big focus-ovr">${p.rating}<small>OVR</small></span></div>${photoCreditHTML(p)}</div>
    <div class="pinfo"><div class="big">${esc(p.name)}</div><div class="focus-sub">${esc(p.role)} · ${esc(p.nationality)} · Age ${p.age ?? '—'}</div>
-   <div style="margin-top:6px">${p.ownerClub?`Owned by <b>${esc(p.ownerClub)}</b>`:'In the central market'}</div>
+   <div style="margin-top:6px">${p.ownerClub?`Owned by <b>${esc(p.ownerClub)}</b>${p.ownerMembershipId&&d.myMembership&&p.ownerMembershipId!==d.myMembership.id?` <button class="goldbtn" style="margin-left:8px" onclick="openTransferFor('${p.worldPlayerId}','${p.ownerMembershipId}')">Make Offer</button>`:''}`:'In the central market'}</div>
    <div class="statgrid">
      <div class="stat">Rating<b>${p.rating}</b></div><div class="stat">Batting<b>${p.batting}</b></div><div class="stat">Bowling<b>${p.bowling}</b></div>
      <div class="stat">Leadership<b>${p.leadership}</b></div><div class="stat">Base price<b>₹${p.baseValue} Cr</b></div>
@@ -318,6 +323,34 @@ async function render(){saveNav();const v=$('#view');$('#err').textContent='';re
    <div class="bidform"><span><label>Home pitch</label><br><select id="tacpitch"><option value="batting">Batting pitch</option><option value="balanced">Balanced</option><option value="bowling">Bowling pitch</option></select></span></div>
    <button class="goldbtn" onclick="saveTactics()">Save XI &amp; Tactics</button></div>`;
    $('#tbat').value=d.tactics.battingApproach||'Balanced';$('#tacpitch').value=d.tactics.homePitch||'balanced';}
+  else if(tab==='Transfers'){const d=await api(`/api/worlds/${worldId}/offers`);
+   const others=d.members.filter(m=>!m.mine);
+   if(trPrefill){trClub=trPrefill.ownerMid;}
+   if(!others.some(m=>m.id===trClub))trClub=others.length?others[0].id:null;
+   const theirPlayers=trClub?(d.playersByOwner[trClub]||[]):[];
+   const myPlayers=d.playersByOwner[d.myMembershipId]||[];
+   const selPid=trPrefill&&trPrefill.ownerMid===trClub?trPrefill.pid:(theirPlayers[0]||{}).worldPlayerId;
+   const selPlayer=theirPlayers.find(p=>p.worldPlayerId===selPid);
+   const incoming=d.offers.filter(o=>o.direction==='in'), outgoing=d.offers.filter(o=>o.direction==='out');
+   const offerRow=(o,actions)=>`<div class="feeditem"><b>${esc(o.player?o.player.name:'')}</b> (${esc(o.player?o.player.role:'')}, OVR ${o.player?o.player.rating:''}) — ${esc(o.fromClub)} → ${esc(o.toClub)} · <b>₹${o.total} Cr</b> (fee ₹${o.fee}${o.bonus?` + bonus ₹${o.bonus}`:''})${o.swapPlayer?` · swap: ${esc(o.swapPlayer.name)} (OVR ${o.swapPlayer.rating})`:''}${o.promise?` · promise: ${o.promise==='captain'?'Captain':'Vice-captain'}`:''} <span class="pill">${esc(o.status)}</span><br><small>Sent ${new Date(o.createdAt).toLocaleString()} · expires ${new Date(o.expiresAt).toLocaleString()}</small> ${actions||''}</div>`;
+   v.innerHTML=`<div class="panel"><h2>🔁 Transfers &amp; Offers</h2>
+   <p>Football-style transfer market: offer money, add a <b>bonus</b>, throw in a <b>player swap</b>, or promise the incoming player the <b>captaincy</b>. The selling manager accepts or rejects — on acceptance the deal is re-checked (funds, squad sizes 18–25, ownership) and applied at once. Offers expire after 72 hours. Your budget: <b style="color:var(--gold)">₹${sideCache?sideCache.budget:'—'} Cr</b></p>
+   <h3>Make an offer</h3>
+   ${others.length?`<div class="formgrid">
+   <span><label>Target club</label><select id="trclub" onchange="trSetClub(this.value)">${others.map(m=>`<option value="${m.id}" ${m.id===trClub?'selected':''}>${esc(m.clubName)}${m.ai?' 🤖':''}</option>`).join('')}</select></span>
+   <span><label>Their player</label><select id="trplayer">${theirPlayers.map(p=>`<option value="${p.worldPlayerId}" ${p.worldPlayerId===selPid?'selected':''}>${esc(p.name)} — ${esc(p.role)} · OVR ${p.rating} · base ₹${p.baseValue} Cr</option>`).join('')}</select></span>
+   <span><label>Fee ₹ Cr</label><input id="trfee" type="number" step="0.1" min="0" value="${selPlayer?selPlayer.baseValue:''}"></span>
+   <span><label>Bonus ₹ Cr (optional, paid at once on acceptance)</label><input id="trbonus" type="number" step="0.1" min="0" value="0"></span>
+   <span><label>Swap — one of your players (optional)</label><select id="trswap"><option value="">No swap</option>${myPlayers.map(p=>`<option value="${p.worldPlayerId}">${esc(p.name)} — ${esc(p.role)} · OVR ${p.rating}</option>`).join('')}</select></span>
+   <span><label>Promise (optional)</label><select id="trpromise"><option value="">No promise</option><option value="captain">Make them Captain</option><option value="vice_captain">Make them Vice-Captain</option></select></span>
+   </div>
+   <button class="goldbtn" onclick="submitOffer()">Send Offer</button>
+   ${theirPlayers.length?`<p style="margin-top:10px"><small>Target squad — click a name for the player page: ${theirPlayers.map(p=>`<a href="#" onclick="event.preventDefault();openPlayer('${p.worldPlayerId}','Transfers')">${esc(p.name)}</a>`).join(' · ')}</small></p>`:''}`
+   :'<p>No other clubs in this world yet.</p>'}
+   </div>
+   <div class="panel"><h3>📥 Incoming offers (${incoming.length})</h3>${incoming.length?incoming.map(o=>offerRow(o,o.status==='PENDING'?`<button onclick="offerAccept('${o.id}')">Accept</button> <button class="secondary" onclick="offerReject('${o.id}')">Reject</button>`:'')).join(''):'<p>No offers for your players.</p>'}</div>
+   <div class="panel"><h3>📤 Outgoing offers (${outgoing.length})</h3>${outgoing.length?outgoing.map(o=>offerRow(o,o.status==='PENDING'?`<button class="secondary" onclick="offerWithdraw('${o.id}')">Withdraw</button>`:'')).join(''):'<p>You have made no offers.</p>'}</div>`;
+   trPrefill=null;}
   else if(tab==='Fixtures'){const d=await api(`/api/worlds/${worldId}/fixtures`);
    v.innerHTML=`<div class="panel"><h2>📅 Fixtures & Match Centre</h2><p>No “Play Match” button — matches start automatically at their scheduled server time. Tactical lock: 30 minutes before start. The <b>home manager</b> prepares the pitch — set it per match below (until the lock) or set a standing home pitch on Captain &amp; Tactics.</p>
    <div class="tblwrap"><table><tr><th>Rd</th><th>Fixture</th><th>Scheduled</th><th>Pitch</th><th>Status</th><th>Result / Report</th></tr>
@@ -350,7 +383,14 @@ function playerRows(list){return list.map(a=>`<tr class="clickable" onclick="ope
 window.filterAuctions=q=>{if(!aucCache)return;const list=aucCache.auctions.filter(a=>a.player.name.toLowerCase().includes(q.toLowerCase()));const host=$('#aucList');if(host)host.innerHTML=auctionListRows(list,aucCache.serverNow);};
 window.filterPlayers=q=>{if(!aucCache)return;const list=aucCache.auctions.filter(a=>a.player.name.toLowerCase().includes(q.toLowerCase()));$('#aucBody').innerHTML=playerRows(list);};
 window.openWorld=id=>{worldId=id;sideCache=null;focusPid=null;tab='Waiting Room';renderTabs();render();};
-window.createWorld=async()=>{try{const body={name:$('#wname').value,description:$('#wdesc').value,numberOfClubs:$('#wnum').value,format:$('#wfmt').value,matchIntervalDays:$('#wint').value,matchTime:$('#wtime').value,startDate:$('#wstart').value||undefined,auctionStartAt:$('#wauc').value||undefined,seasonStartAt:$('#wseason').value||undefined,password:$('#wpass').value||undefined,aiFill:$('#waifill').checked};const d=await api('/api/worlds',{method:'POST',body:JSON.stringify(body)});openWorld(d.world.id);}catch(e){$('#err').textContent=e.message;}};
+window.createWorld=async()=>{try{const body={name:$('#wname').value,description:$('#wdesc').value,numberOfClubs:$('#wnum').value,format:$('#wfmt').value,matchIntervalDays:$('#wint').value,matchTime:$('#wtime').value,startDate:$('#wstart').value||undefined,auctionStartAt:$('#wauc').value||undefined,seasonStartAt:$('#wseason').value||undefined,password:$('#wpass').value||undefined,aiFill:$('#waifill').checked,squadMode:$('#wmode').value};
+// ---- transfer market actions ----
+window.trSetClub=v=>{trClub=v;render();};
+window.openTransferFor=(pid,mid)=>{trPrefill={pid,ownerMid:mid};tab='Transfers';renderTabs();render();};
+window.submitOffer=async()=>{try{const body={toMembershipId:$('#trclub').value,worldPlayerId:$('#trplayer').value,fee:+$('#trfee').value||0,bonus:+$('#trbonus').value||0,swapWorldPlayerId:$('#trswap').value||undefined,promise:$('#trpromise').value||undefined};await api(`/api/worlds/${worldId}/offers`,{method:'POST',body:JSON.stringify(body)});alert('Offer sent! The selling manager can accept or reject it in Transfers & Offers.');render();}catch(e){$('#err').textContent=e.message;}};
+window.offerAccept=async id=>{try{await api(`/api/offers/${id}/accept`,{method:'POST',body:'{}'});render();}catch(e){$('#err').textContent=e.message;}};
+window.offerReject=async id=>{try{await api(`/api/offers/${id}/reject`,{method:'POST',body:'{}'});render();}catch(e){$('#err').textContent=e.message;}};
+window.offerWithdraw=async id=>{try{await api(`/api/offers/${id}/withdraw`,{method:'POST',body:'{}'});render();}catch(e){$('#err').textContent=e.message;}};const d=await api('/api/worlds',{method:'POST',body:JSON.stringify(body)});openWorld(d.world.id);}catch(e){$('#err').textContent=e.message;}};
 window.joinWorld=async()=>{try{const club=document.querySelector('input[name=club]:checked');if(!club)throw new Error('Select a club first.');await api(`/api/worlds/${worldId}/join`,{method:'POST',body:JSON.stringify({clubName:club.value,password:($('#jpass')||{}).value})});render();}catch(e){$('#err').textContent=e.message;}};
 window.startWorld=async()=>{try{const d=await api(`/api/worlds/${worldId}/start`,{method:'POST',body:'{}'});alert(`World started! ${d.aiAdded?d.aiAdded+' AI manager(s) filled the empty clubs. ':''}The auction is open.`);tab='Auction';renderTabs();render();}catch(e){$('#err').textContent=e.message;}};
 window.bid=async id=>{try{const u=document.getElementById('undis-'+id);await api(`/api/auctions/${id}/bid`,{method:'POST',body:JSON.stringify({amount:+document.getElementById('bid-'+id).value,undisclosed:!!(u&&u.checked)})});render();}catch(e){$('#err').textContent=e.message;}};
