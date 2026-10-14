@@ -17,6 +17,8 @@ services:
     envVars:
       - key: SESSION_SECRET
         generateValue: true
+      - key: PUBLIC_URL
+        value: https://cricket-manager-worlds.onrender.com # public origin for OAuth redirects (https)
       - key: DATABASE_MODE
         value: local # switch to "supabase" + fill the keys below after migration step 2
       - key: SUPABASE_URL

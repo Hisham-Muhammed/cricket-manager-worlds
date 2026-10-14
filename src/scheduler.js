@@ -11,7 +11,10 @@ const { load, save, id, nowISO, emit, notify, news } = require('./db');
 const PLAYERS = require('./players');
 const { generateFixtures } = require('./fixtures');
 const { simulate } = require('./matchEngine');
-const { AI_SQUAD_TARGET, topBid, squadCount, leadingList, validateBid, placeBid } = require('./bids');
+const { AI_SQUAD_TARGET, topBid, validBids, squadCount, leadingList, validateBid, placeBid } = require('./bids');
+// Share of its budget an AI may have committed to NEW fronts. The rest
+// is a war-chest, kept free so the AI can always defend its targets.
+const AI_WARCHEST_FRACTION = 0.6;
 let ticking = false;
 
 /**
@@ -37,12 +40,33 @@ function startWorld(db, world) {
 
 /**
  * AI managers take their auction turn. Bounded and polite: per tick
- * each AI places at most 2 bids, prefers the highest-rated players it
- * is not already leading, bids a modest increment over the current
- * price, and never snipes in the final minutes. Every bid goes through
- * the same validateBid() guard as a human bid (squad cap + budget
- * reserve for a minimum 18-player squad) and stops once the AI's
- * squad + live leads reach its target size.
+ * each AI places at most 2 bids, bids a modest increment over the
+ * current price, and never snipes in the final minutes. Every bid goes
+ * through the same validateBid() guard as a human bid (squad cap +
+ * budget reserve for a minimum 18-player squad) and stops once the
+ * AI's squad + live leads reach its target size.
+ *
+ * Candidate order per AI: FIRST the auctions it was outbid on (it holds
+ * a live bid but no longer leads — a manager defends its targets
+ * before opening new fronts), then new auctions, highest-rated first.
+ * And an AI only opens a NEW front while its live commitments stay
+ * under AI_WARCHEST_FRACTION of its budget.
+ *
+ * Why: the old policy opened 2 new fronts per tick with no commitment
+ * cap, so within ~10 ticks an AI led ~18 star-heavy auctions totalling
+ * ≈₹99.95 Cr of its ₹100 Cr (measured on a live-style repro). From
+ * then on validateBid() rejected EVERY further bid ("Insufficient
+ * transfer funds.") and the target-count check was saturated too —
+ * the AI was frozen for the rest of the auction. When a human then
+ * outbid it on a star (the reported case used an undisclosed bid, but
+ * disclosed bids froze identically), re-bidding needed top+5% while
+ * its other leads still committed ≈₹85 Cr, so it could never respond
+ * on that auction again; the other AIs never reached it either, each
+ * scanning from its own offset and spending its 2-bid quota first.
+ * Masking was NOT the cause: this path reads raw db.bids via
+ * bids.js (topBid/validBids/leadingList); bidView/auctionView masking
+ * exists only in HTTP serialization (src/server.js) and never feeds
+ * server logic.
  */
 function aiTakeTurn(db, world) {
   const now = Date.now();
@@ -59,17 +83,34 @@ function aiTakeTurn(db, world) {
   let changed = false;
   aiMembers.forEach((m, mi) => {
     let placed = 0;
-    let committed = squadCount(db, world.id, m.id) + leadingList(db, world.id, m.id).length;
+    const leads = leadingList(db, world.id, m.id);
+    let committedCount = squadCount(db, world.id, m.id) + leads.length;
+    let committedCr = leads.reduce((s, l) => s + l.bid.amount, 0);
+    const leadIds = new Set(leads.map(l => l.auction.id));
+    // Auctions this AI is contesting but no longer leads: defend first.
+    const defend = ranked.filter(r => !leadIds.has(r.auction.id)
+      && validBids(db, r.auction.id).some(b => b.membershipId === m.id));
+    const defendIds = new Set(defend.map(r => r.auction.id));
     const offset = ranked.length ? (mi * 13) % ranked.length : 0; // AIs don't all chase the same player first
-    for (let i = 0; i < ranked.length && placed < 2; i++) {
-      if (committed >= AI_SQUAD_TARGET) break;
-      const { auction } = ranked[(offset + i) % ranked.length];
+    const fresh = [];
+    for (let i = 0; i < ranked.length; i++) {
+      const r = ranked[(offset + i) % ranked.length];
+      if (!leadIds.has(r.auction.id) && !defendIds.has(r.auction.id)) fresh.push(r);
+    }
+    for (const { auction } of [...defend, ...fresh]) {
+      if (placed >= 2 || committedCount >= AI_SQUAD_TARGET) break;
       const top = topBid(db, auction.id);
       if (top && top.membershipId === m.id) continue; // already leading it
+      const isDefend = defendIds.has(auction.id);
+      // War-chest: new fronts only while commitments stay under the
+      // ceiling — otherwise the AI strands its whole budget in early
+      // leads and can never defend any of them (see note above).
+      // Defending a lost lead is exempt; validateBid still applies.
+      if (!isDefend && committedCr >= AI_WARCHEST_FRACTION * m.budget) continue;
       const amount = top ? +(top.amount + Math.max(0.1, Math.round(top.amount * 5) / 100)).toFixed(2) : auction.baseValue;
       if (validateBid(db, m, auction, amount)) continue; // same guard as humans
       placeBid(db, m, auction, amount, {});
-      placed++; committed++; changed = true;
+      placed++; committedCount++; committedCr = +(committedCr + amount).toFixed(2); changed = true;
     }
   });
   return changed;
@@ -201,4 +242,4 @@ function startScheduler() {
   setInterval(() => { try { tick(); } catch (e) { console.error('[scheduler]', e); } }, ms);
   console.log(`[scheduler] ticking every ${ms}ms (server time is source of truth)`);
 }
-module.exports = { tick, startScheduler, settleAuction, openAuctions, startWorld };
+module.exports = { tick, startScheduler, settleAuction, openAuctions, startWorld, AI_WARCHEST_FRACTION };

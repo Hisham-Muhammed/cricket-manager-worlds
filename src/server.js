@@ -17,10 +17,29 @@ const { topBid, validBids, validateBid, placeBid } = require('./bids');
 const supa = require('./supabase');
 
 const SECRET = process.env.SESSION_SECRET || 'dev-only-change-me';
+// Public origin of the site (scheme + host, no trailing slash) for
+// building URLs that leave the server (OAuth redirects). PUBLIC_URL
+// wins when set; otherwise the origin is derived from the request,
+// which is https-correct behind a TLS-terminating proxy thanks to
+// 'trust proxy' below. (Bug: the Supabase redirect_to used to be built
+// from req.protocol alone, which is 'http' behind Render's proxy, so
+// Google sign-in redirected to http://…onrender.com/ .)
+const PUBLIC_URL = String(process.env.PUBLIC_URL || '').replace(/\/+$/, '');
+const publicOrigin = req => PUBLIC_URL || `${req.protocol}://${req.get('host')}`;
+const googleCallbackUrl = () => process.env.GOOGLE_CALLBACK_URL
+  || (PUBLIC_URL ? `${PUBLIC_URL}/api/auth/google/callback` : 'http://localhost:3000/api/auth/google/callback');
+// Session cookie attributes, shared by every login path. The JWT
+// itself is stateless with a 30-day expiry, so sessions survive
+// server restarts in both modes — the cookie must be just as
+// long-lived: an explicit Path=/ and a 30-day Max-Age (a bare session
+// cookie would vanish with the browser session and "log the user
+// out" on refresh/reopen).
+const COOKIE_OPTS = { httpOnly: true, sameSite: 'lax', path: '/', maxAge: 30 * 864e5 };
 const CLUBS = ['Chennai Super Kings','Mumbai Indians','Royal Challengers Bengaluru','Kolkata Knight Riders','Rajasthan Royals','Sunrisers Hyderabad','Delhi Capitals','Punjab Kings','Lucknow Super Giants','Gujarat Titans']; // the original IPL franchises
 const START_BUDGET = 100;
 
 const app = express();
+app.set('trust proxy', true); // hosts (Render/Railway) terminate TLS and proxy http — honour X-Forwarded-Proto/Host
 app.use(express.json()); app.use(cookieParser());
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
@@ -111,7 +130,7 @@ app.post('/api/auth/register', async (req, res) => {
         .insert({ auth_user_id: created.user.id, name, email: normEmail, provider: 'email' }).select('*').single();
       if (insErr) return res.status(502).json({ error: 'Could not create the account. Please try again.' });
       const u = managerToUser(m);
-      return res.cookie('token', sign(u), { httpOnly: true, sameSite: 'lax', maxAge: 30 * 864e5 }).json({ user: pubUser(load(), u), serverNow: nowISO() });
+      return res.cookie('token', sign(u), COOKIE_OPTS).json({ user: pubUser(load(), u), serverNow: nowISO() });
     } catch { return res.status(503).json({ error: 'Auth service unavailable.' }); }
   }
   const db = load();
@@ -119,7 +138,7 @@ app.post('/api/auth/register', async (req, res) => {
   const u = { id: id('mgr'), name, email, passwordHash: bcrypt.hashSync(password, 12), provider: 'email', profileImage: '', createdAt: nowISO(),
     stats: { matchesManaged: 0, wins: 0, auctionsWon: 0 }, trophies: [], history: [] };
   db.users.push(u); save();
-  res.cookie('token', sign(u), { httpOnly: true, sameSite: 'lax', maxAge: 30 * 864e5 }).json({ user: pubUser(db, u), serverNow: nowISO() });
+  res.cookie('token', sign(u), COOKIE_OPTS).json({ user: pubUser(db, u), serverNow: nowISO() });
 });
 app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body || {};
@@ -130,15 +149,15 @@ app.post('/api/auth/login', async (req, res) => {
       if (error || !data || !data.user) return res.status(401).json({ error: 'Invalid email or password.' });
       const m = await ensureManager(supa.getServiceClient(), data.user, 'email');
       const u = managerToUser(m);
-      return res.cookie('token', sign(u), { httpOnly: true, sameSite: 'lax', maxAge: 30 * 864e5 }).json({ user: pubUser(load(), u), serverNow: nowISO() });
+      return res.cookie('token', sign(u), COOKIE_OPTS).json({ user: pubUser(load(), u), serverNow: nowISO() });
     } catch { return res.status(503).json({ error: 'Auth service unavailable.' }); }
   }
   const db = load();
   const u = db.users.find(x => x.email.toLowerCase() === String(email || '').toLowerCase());
   if (!u || u.ai || !u.passwordHash || !bcrypt.compareSync(password || '', u.passwordHash)) return res.status(401).json({ error: 'Invalid email or password.' }); // AI managers can never sign in
-  res.cookie('token', sign(u), { httpOnly: true, sameSite: 'lax', maxAge: 30 * 864e5 }).json({ user: pubUser(db, u), serverNow: nowISO() });
+  res.cookie('token', sign(u), COOKIE_OPTS).json({ user: pubUser(db, u), serverNow: nowISO() });
 });
-app.post('/api/auth/logout', (req, res) => res.clearCookie('token').json({ ok: true }));
+app.post('/api/auth/logout', (req, res) => res.clearCookie('token', { path: '/' }).json({ ok: true }));
 app.get('/api/auth/me', auth, (req, res) => { const db = load();
   db.memberships.filter(m => m.userId === req.user.id).forEach(m => m.lastSeenAt = nowISO()); save();
   res.json({ user: pubUser(db, req.user), serverNow: nowISO() }); });
@@ -150,12 +169,12 @@ app.get('/api/auth/google', (req, res) => {
     // redirects back to the site root with the session in the URL hash;
     // public/app.js hands the access token to the session route below,
     // which verifies it and links/creates the manager profile.
-    const redirectTo = `${req.protocol}://${req.get('host')}/`;
+    const redirectTo = `${publicOrigin(req)}/`;
     return res.redirect(`${process.env.SUPABASE_URL}/auth/v1/authorize?provider=google&redirect_to=${encodeURIComponent(redirectTo)}`);
   }
   if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET)
     return res.status(501).send('Google OAuth needs configuration: set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET (see README / .env.example), then restart the server. Email login works without it.');
-  const p = new URLSearchParams({ client_id: process.env.GOOGLE_CLIENT_ID, redirect_uri: process.env.GOOGLE_CALLBACK_URL || 'http://localhost:3000/api/auth/google/callback',
+  const p = new URLSearchParams({ client_id: process.env.GOOGLE_CLIENT_ID, redirect_uri: googleCallbackUrl(),
     response_type: 'code', scope: 'openid email profile', access_type: 'offline', prompt: 'select_account' });
   res.redirect('https://accounts.google.com/o/oauth2/v2/auth?' + p);
 });
@@ -172,7 +191,7 @@ app.post('/api/auth/google/session', async (req, res) => {
     if (error || !data || !data.user || !data.user.email) return res.status(401).json({ error: 'Google sign-in failed.' });
     const m = await ensureManager(admin, data.user, 'google');
     const u = managerToUser(m);
-    return res.cookie('token', sign(u), { httpOnly: true, sameSite: 'lax', maxAge: 30 * 864e5 }).json({ user: pubUser(load(), u), serverNow: nowISO() });
+    return res.cookie('token', sign(u), COOKIE_OPTS).json({ user: pubUser(load(), u), serverNow: nowISO() });
   } catch { return res.status(503).json({ error: 'Auth service unavailable.' }); }
 });
 app.get('/api/auth/google/callback', async (req, res) => {
@@ -180,12 +199,12 @@ app.get('/api/auth/google/callback', async (req, res) => {
     if (!req.query.code) throw new Error('no code');
     const tok = await (await fetch('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ code: req.query.code, client_id: process.env.GOOGLE_CLIENT_ID, client_secret: process.env.GOOGLE_CLIENT_SECRET,
-        redirect_uri: process.env.GOOGLE_CALLBACK_URL || 'http://localhost:3000/api/auth/google/callback', grant_type: 'authorization_code' }) })).json();
+        redirect_uri: googleCallbackUrl(), grant_type: 'authorization_code' }) })).json();
     const info = await (await fetch('https://openidconnect.googleapis.com/v1/userinfo', { headers: { Authorization: 'Bearer ' + tok.access_token } })).json();
     if (!info.email) throw new Error('no email');
     const db = load(); let u = db.users.find(x => x.email.toLowerCase() === info.email.toLowerCase());
     if (!u) { u = { id: id('mgr'), name: info.name || info.email, email: info.email, passwordHash: null, provider: 'google', profileImage: info.picture || '', createdAt: nowISO(), stats: { matchesManaged: 0, wins: 0, auctionsWon: 0 }, trophies: [], history: [] }; db.users.push(u); save(); }
-    res.cookie('token', sign(u), { httpOnly: true, sameSite: 'lax', maxAge: 30 * 864e5 }).redirect('/');
+    res.cookie('token', sign(u), COOKIE_OPTS).redirect('/');
   } catch { res.status(502).send('Google sign-in failed. Check OAuth credentials / redirect URI in .env.'); }
 });
 
