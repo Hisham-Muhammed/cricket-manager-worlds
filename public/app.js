@@ -4,7 +4,7 @@ let me=null, worldId=null, tab='Lobby', playerPid=null, backTab='Auction', aucCa
 let trClub=null, trPrefill=null;
 let focusPid=null, squadCache=null, squadSel=null;
 const $=s=>document.querySelector(s), esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-async function api(p,o={}){const r=await fetch(p,{headers:{'Content-Type':'application/json'},...o});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||r.status);return d;}
+async function api(p,o={}){const r=await fetch(p,{headers:{'Content-Type':'application/json'},...o});const d=await r.json().catch(()=>({}));if(!r.ok){const e=new Error(d.error||r.status);e.status=r.status;e.data=d;throw e;}return d;}
 function countdown(iso,serverNow){let ms=new Date(iso)-new Date(serverNow);if(ms<0)ms=0;const h=Math.floor(ms/36e5),m=Math.floor(ms%36e5/6e4),s=Math.floor(ms%6e4/1e3);return `${h}h ${m}m ${s}s`;}
 function initials(name){return String(name||'?').split(/\s+/).map(x=>x[0]).join('').slice(0,3).toUpperCase();}
 function crestHTML(name,cls){return `<span class="crest ${cls||''}"><span>${esc(initials(name))}</span></span>`;}
@@ -62,8 +62,17 @@ async function boot(){if(location.hash.includes('access_token=')){const h=new UR
 function authMode(reg){$('#tabSignIn').classList.toggle('on',!reg);$('#tabRegister').classList.toggle('on',reg);$('#loginBtn').classList.toggle('hidden',reg);$('#regBtn').classList.toggle('hidden',!reg);$('#mnameRow').classList.toggle('hidden',!reg);}
 $('#tabSignIn').onclick=()=>authMode(false);
 $('#tabRegister').onclick=()=>authMode(true);
-$('#loginBtn').onclick=async()=>{try{const d=await api('/api/auth/login',{method:'POST',body:JSON.stringify({email:$('#email').value,password:$('#password').value})});me=d.user;showApp();}catch(e){$('#authErr').textContent=e.message;}};
-$('#regBtn').onclick=async()=>{try{const d=await api('/api/auth/register',{method:'POST',body:JSON.stringify({name:$('#mname').value,email:$('#email').value,password:$('#password').value})});me=d.user;showApp();}catch(e){$('#authErr').textContent=e.message;}};
+$('#loginBtn').onclick=async()=>{try{const d=await api('/api/auth/login',{method:'POST',body:JSON.stringify({email:$('#email').value,password:$('#password').value})});me=d.user;showApp();}catch(e){if(e.data&&e.data.needsOtp)return showOtp(e.data.email);$('#authErr').textContent=e.message;}};
+$('#regBtn').onclick=async()=>{try{const d=await api('/api/auth/register',{method:'POST',body:JSON.stringify({name:$('#mname').value,email:$('#email').value,password:$('#password').value})});if(d.needsOtp)return showOtp(d.email);me=d.user;showApp();}catch(e){if(e.data&&e.data.needsOtp)return showOtp(e.data.email);$('#authErr').textContent=e.message;}};
+// ---- email OTP confirmation (supabase mode): registration and an
+// unverified login land here; the account gets a session only after
+// the code emailed by Supabase is verified ----
+let otpEmail='';
+function showOtp(email){otpEmail=email||$('#email').value;$('#otpEmailLabel').textContent=otpEmail;$('#otpErr').textContent='';$('#otpInfo').textContent='';$('#otpCode').value='';$('#authForm').classList.add('hidden');$('#otpView').classList.remove('hidden');$('#otpCode').focus();}
+function hideOtp(){$('#otpView').classList.add('hidden');$('#authForm').classList.remove('hidden');}
+$('#otpBtn').onclick=async()=>{try{const d=await api('/api/auth/verify-otp',{method:'POST',body:JSON.stringify({email:otpEmail,code:$('#otpCode').value.trim()})});me=d.user;hideOtp();showApp();}catch(e){$('#otpErr').textContent=e.message;}};
+$('#otpResend').onclick=async()=>{$('#otpErr').textContent='';try{await api('/api/auth/resend-otp',{method:'POST',body:JSON.stringify({email:otpEmail})});$('#otpInfo').textContent='A new code is on its way — check your inbox.';}catch{$('#otpInfo').textContent='Could not resend right now — try again in a moment.';}};
+$('#otpBack').onclick=()=>{hideOtp();authMode(false);};
 function showApp(){$('#authView').classList.add('hidden');$('#appView').classList.remove('hidden');$('#who').innerHTML=`<span class="mgr-ava">${esc(initials(me.name))}</span><span><span class="mgr-name">${esc(me.name)}</span> <span class="mgr-email">(${esc(me.email)})</span></span> <button class="secondary" onclick="logout()">Logout</button>`;renderTabs();render();}
 window.logout=async()=>{clearNav();await api('/api/auth/logout',{method:'POST'});location.reload();};
 
