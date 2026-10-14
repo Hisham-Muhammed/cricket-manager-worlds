@@ -332,6 +332,10 @@ const pubWorld = (db, w, userId) => ({ id: w.id, name: w.name, description: w.de
   managersCount: db.memberships.filter(m => m.worldId === w.id).length, status: w.state, state: w.state,
   startDate: w.startDate, auctionStartAt: w.auctionStartAt, seasonStartAt: w.seasonStartAt, format: w.format,
   competitionStructure: w.competitionStructure, matchIntervalDays: w.matchIntervalDays, matchTime: w.matchTime,
+  matchIntervalMinutes: w.matchIntervalMinutes || null,
+  pace: w.pace === 'fast' ? 'fast' : 'standard', // 'standard' (days) or 'fast' (test pace, minutes)
+  seasonNumber: w.seasonNumber || 1,
+  championMembershipId: w.championMembershipId || null, lastSeasonStandings: w.lastSeasonStandings || null,
   timezone: w.timezone, seasonLength: w.seasonLength, isPrivate: !!w.passwordHash, aiFill: w.aiFill !== false,
   squadMode: w.squadMode === 'draft' ? 'draft' : 'auction', // World Mode 2: 'auction' (default) or 'draft'
   joined: userId ? !!memberOf(db, w.id, userId) : false, serverNow: nowISO() });
@@ -341,18 +345,30 @@ app.post('/api/worlds', auth, (req, res) => {
   const b = req.body || {};
   if (!b.name) return res.status(400).json({ error: 'World name is required.' });
   const db = load();
-  const start = b.startDate ? new Date(b.startDate) : new Date(Date.now() + 24 * 3600 * 1000);
+  const fast = b.pace === 'fast';
+  const squadMode = b.squadMode === 'draft' ? 'draft' : 'auction';
+  // Default timeline. Standard pace is unchanged (world tomorrow,
+  // auction a day later, season 4 days after the world start). Fast
+  // (test) pace compresses the defaults to minutes so a whole season
+  // can be experienced quickly; explicit client dates always win.
+  const start = b.startDate ? new Date(b.startDate) : new Date(Date.now() + (fast ? 0 : 24 * 3600 * 1000));
+  const auctionStart = b.auctionStartAt ? new Date(b.auctionStartAt)
+    : new Date(start.getTime() + (fast ? 60000 : 24 * 3600 * 1000));
+  const seasonStart = b.seasonStartAt ? new Date(b.seasonStartAt)
+    : fast ? new Date(auctionStart.getTime() + (squadMode === 'draft' ? 2 : 12) * 60000)
+           : new Date(start.getTime() + 4 * 24 * 3600 * 1000);
   const w = { id: id('world'), name: b.name, description: b.description || '', creatorId: req.user.id,
     numberOfClubs: Math.min(CLUBS.length, Math.max(2, parseInt(b.numberOfClubs || 10, 10))),
     format: b.format || 'League (Home & Away)', competitionStructure: b.competitionStructure || 'Round-robin league',
     matchIntervalDays: Math.min(7, Math.max(1, parseInt(b.matchIntervalDays || 3, 10))), matchTime: b.matchTime || '20:00',
+    pace: fast ? 'fast' : 'standard', matchIntervalMinutes: fast ? 10 : null, seasonNumber: 1,
     timezone: b.timezone || 'Asia/Kolkata', seasonLength: b.seasonLength || '1 season',
     auctionSettings: b.auctionSettings || { durationHours: 24, startingBudget: START_BUDGET },
-    startDate: start.toISOString(), auctionStartAt: (b.auctionStartAt ? new Date(b.auctionStartAt) : new Date(start.getTime() + 24 * 3600 * 1000)).toISOString(),
-    seasonStartAt: (b.seasonStartAt ? new Date(b.seasonStartAt) : new Date(start.getTime() + 4 * 24 * 3600 * 1000)).toISOString(),
+    startDate: start.toISOString(), auctionStartAt: auctionStart.toISOString(),
+    seasonStartAt: seasonStart.toISOString(),
     passwordHash: b.password ? bcrypt.hashSync(b.password, 12) : null, // hashed, never returned
     aiFill: b.aiFill !== false, // empty clubs are filled with AI managers when the creator starts the world
-    squadMode: b.squadMode === 'draft' ? 'draft' : 'auction', // auction = empty squads + bidding; draft = squads distributed equally
+    squadMode, // auction = empty squads + bidding; draft = squads distributed equally
     state: 'RECRUITING', createdAt: nowISO() };
   db.worlds.push(w); emit(db, w.id, 'WORLD_CREATED', { name: w.name }); save();
   res.status(201).json({ world: pubWorld(db, w, req.user.id) });
@@ -450,7 +466,7 @@ function auctionView(db, a, viewerMembershipId, userId) {
   const leaderHidden = !!top && !!top.undisclosed && top.membershipId !== viewerMembershipId;
   const owner = wp && wp.ownerMembershipId && db.memberships.find(m => m.id === wp.ownerMembershipId);
   return { auctionId: a.id, worldPlayerId: a.worldPlayerId,
-    player: { id: wp && wp.id, worldPlayerId: wp && wp.id, name: t.name, age: t.age, role: t.role, nationality: t.nationality, rating: t.rating, batting: t.batting, bowling: t.bowling, leadership: t.leadership, prefBatPos: t.prefBatPos, prefOvers: t.prefOvers, approach: t.approach, ...photoFields(t) },
+    player: { id: wp && wp.id, worldPlayerId: wp && wp.id, name: t.name, age: t.age, role: t.role, nationality: t.nationality, rating: (t.rating || 0) + ((wp && wp.ratingDelta) || 0), batting: t.batting, bowling: t.bowling, leadership: t.leadership, prefBatPos: t.prefBatPos, batPositions: t.batPositions, prefOvers: t.prefOvers, approach: t.approach, ...photoFields(t) },
     baseValue: a.baseValue, auctionStartsAt: a.auctionStartsAt, auctionEndsAt: a.auctionEndsAt, status: a.status,
     currentPrice: top ? top.amount : a.baseValue, // the price is always public
     highestBid: top ? top.amount : null, highestBidderClub: top ? (leaderHidden ? 'Undisclosed' : (tm ? tm.clubName : null)) : null,
@@ -479,8 +495,8 @@ app.get('/api/worlds/:wid/players/:pid', auth, (req, res) => { const db = load()
     .sort((x, y) => new Date(y.createdAt) - new Date(x.createdAt) || y.amount - x.amount)
     .map(b => bidView(db, b, mine && mine.id)) : [];
   res.json({ player: { worldPlayerId: wp.id, templateId: wp.templateId, name: t.name, age: t.age, role: t.role,
-      nationality: t.nationality, rating: t.rating, batting: t.batting, bowling: t.bowling, leadership: t.leadership,
-      prefBatPos: t.prefBatPos, prefOvers: t.prefOvers, approach: t.approach, ...photoFields(t),
+      nationality: t.nationality, rating: t.rating + (wp.ratingDelta || 0), batting: t.batting, bowling: t.bowling, leadership: t.leadership,
+      prefBatPos: t.prefBatPos, batPositions: t.batPositions, prefOvers: t.prefOvers, approach: t.approach, ...photoFields(t),
       baseValue: t.baseValue, form: wp.form, fitness: wp.fitness, morale: wp.morale, status: wp.status,
       ownerClub: owner ? owner.clubName : null, ownerMembershipId: owner ? owner.id : null },
     auction: auction ? auctionView(db, auction, mine && mine.id, req.user.id) : null,
@@ -536,7 +552,7 @@ app.post('/api/auctions/:id/watchlist', auth, (req, res) => { const db = load();
 app.get('/api/worlds/:id/squad', auth, (req, res) => { const db = load(); const m = memberOf(db, req.params.id, req.user.id);
   if (!m) return res.status(403).json({ error: 'Not a member of this world.' });
   const squad = db.worldPlayers.filter(p => p.worldId === req.params.id && p.ownerMembershipId === m.id)
-    .map(p => { const t = tpl(p); return { ...t, ...photoFields(t), worldPlayerId: p.id, form: p.form, fitness: p.fitness, morale: p.morale, isCaptain: m.captainId === p.id, isViceCaptain: m.viceCaptainId === p.id }; });
+    .map(p => { const t = tpl(p); return { ...t, ...photoFields(t), worldPlayerId: p.id, rating: (t.rating || 0) + (p.ratingDelta || 0), ratingDelta: p.ratingDelta || 0, form: p.form, fitness: p.fitness, morale: p.morale, isCaptain: m.captainId === p.id, isViceCaptain: m.viceCaptainId === p.id }; });
   res.json({ squad, budget: m.budget, xi: m.xi, tactics: withDefaults(m.tactics), captainId: m.captainId, viceCaptainId: m.viceCaptainId, clubName: m.clubName }); });
 app.post('/api/worlds/:id/captain', auth, (req, res) => { const db = load(); const m = memberOf(db, req.params.id, req.user.id);
   if (!m) return res.status(403).json({ error: 'Not a member.' });
@@ -548,11 +564,13 @@ app.post('/api/worlds/:id/captain', auth, (req, res) => { const db = load(); con
   emit(db, m.worldId, 'CAPTAINCY_CHANGED', { player: tpl(p).name, role: role || 'captain' }); save(); res.json({ captainId: m.captainId, viceCaptainId: m.viceCaptainId }); });
 app.post('/api/worlds/:id/xi', auth, (req, res) => { const db = load(); const m = memberOf(db, req.params.id, req.user.id);
   if (!m) return res.status(403).json({ error: 'Not a member.' });
-  // Tactical lock: no XI/tactics changes within 30 min of your next fixture
+  // Tactical lock: no XI/tactics changes inside the lock window of your
+  // next fixture (30 minutes before start; 2 minutes in fast pace —
+  // the fixture's stored tacticalLockAt already encodes it).
   const next = db.fixtures.filter(f => f.worldId === m.worldId && [f.homeMembershipId, f.awayMembershipId].includes(m.id) && f.status !== 'COMPLETED')
     .sort((a, b) => new Date(a.scheduledAt) - new Date(b.scheduledAt))[0];
   if (next && Date.now() >= new Date(next.tacticalLockAt).getTime() && Date.now() < new Date(next.scheduledAt).getTime() + 30 * 60000)
-    return res.status(423).json({ error: 'Team selection is locked for the upcoming match (deadline was 30 minutes before start).' });
+    return res.status(423).json({ error: `Team selection is locked for the upcoming match (deadline was ${Math.round((new Date(next.scheduledAt) - new Date(next.tacticalLockAt)) / 60000)} minutes before start).` });
   const { xi, tactics } = req.body || {};
   const owned = new Set(db.worldPlayers.filter(p => p.ownerMembershipId === m.id).map(p => p.id));
   const newXi = xi !== undefined ? xi : (m.xi || []);
@@ -595,7 +613,7 @@ app.post('/api/worlds/:id/fixtures/:fid/pitch', auth, (req, res) => { const db =
   if (!PITCHES.includes(pitch)) return res.status(400).json({ error: `Pitch must be one of: ${PITCHES.join(', ')}.` });
   if (f.status === 'COMPLETED' || f.status === 'CANCELLED') return res.status(409).json({ error: 'This match has already been played.' });
   if (Date.now() >= new Date(f.tacticalLockAt).getTime())
-    return res.status(423).json({ error: 'The pitch is locked for this match (deadline was 30 minutes before start).' });
+    return res.status(423).json({ error: `The pitch is locked for this match (deadline was ${Math.round((new Date(f.scheduledAt) - new Date(f.tacticalLockAt)) / 60000)} minutes before start).` });
   f.pitch = pitch;
   emit(db, m.worldId, 'PITCH_CHANGED', { club: m.clubName, pitch, fixtureId: f.id });
   save(); res.json({ fixtureId: f.id, pitch }); });
