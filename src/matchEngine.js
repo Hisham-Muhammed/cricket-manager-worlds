@@ -10,9 +10,12 @@ const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 /**
  * Preference fit for one team. Compares the manager's tactics against
- * each player's preferences (template prefBatPos / prefOvers):
- * - batting at a position within ±1 of the preferred one = happy;
- *   2-3 away = mild misuse; 4+ away = severe misuse.
+ * each player's preferences (template batPositions / prefBatPos /
+ * prefOvers):
+ * - batting is HAPPY when the played position is inside the player's
+ *   batPositions set (real players accept several positions — the
+ *   primary prefBatPos is just the favourite); 1 position outside
+ *   the set = mild misuse; 2+ outside = severe misuse.
  * - a bowler is happy when at least half their overs come in their
  *   preferred phases; a specialist (bowling 78+) given no overs at
  *   all in a manager-set plan is mild misuse ("left unused").
@@ -35,10 +38,13 @@ function computeFit(xi, tactics) {
   for (const p of xi) {
     batPen[p.id] = 0; bowlPen[p.id] = 0;
     if (orderSet) {
-      const diff = Math.abs(p.batPos - (p.prefBatPos || p.batPos));
-      if (diff <= 1) { fx(p).moraleDelta += 2; }
-      else if (diff <= 3) { const e = fx(p); e.moraleDelta -= 6; e.formDelta -= 3; e.misused = true; batPen[p.id] = 3; }
-      else { const e = fx(p); e.moraleDelta -= 12; e.formDelta -= 6; e.misused = true; batPen[p.id] = 6; }
+      const set = (Array.isArray(p.batPositions) && p.batPositions.length) ? p.batPositions : [p.prefBatPos || p.batPos];
+      if (set.includes(p.batPos)) { fx(p).moraleDelta += 2; }
+      else {
+        const outside = Math.min(...set.map(s => Math.abs(s - p.batPos))); // distance beyond the nearest accepted position
+        if (outside <= 1) { const e = fx(p); e.moraleDelta -= 6; e.formDelta -= 3; e.misused = true; batPen[p.id] = 3; }
+        else { const e = fx(p); e.moraleDelta -= 12; e.formDelta -= 6; e.misused = true; batPen[p.id] = 6; }
+      }
     }
     if (planSet) {
       const entry = (tactics.bowlingPlan || {})[p.id];
@@ -88,7 +94,7 @@ function teamStrength(db, worldId, membership) {
   const byId = Object.fromEntries(owned.map(p => [p.id, p]));
   let xiIds = (membership.xi || []).filter(pid => byId[pid]);
   if (xiIds.length < 11) xiIds = [...xiIds, ...owned.map(p => p.id).filter(x => !xiIds.includes(x))].slice(0, 11);
-  const merged = xiIds.map(pid => { const wp = byId[pid]; const t = TEMPLATES.find(x => x.id === wp.templateId) || {}; return { ...t, ...wp, rating: t.rating || 70 }; });
+  const merged = xiIds.map(pid => { const wp = byId[pid]; const t = TEMPLATES.find(x => x.id === wp.templateId) || {}; return { ...t, ...wp, rating: (t.rating || 70) + (wp.ratingDelta || 0) }; });
   if (!merged.length) return { strength: 45, xi: [], captainBoost: 0, attack: 45, moraleEffects: [], misused: [], oversByPlayer: {} }; // empty squad = weak, by design
   const tactics = withDefaults(membership.tactics);
   // Batting order: the manager's saved order first (filtered to the
@@ -180,4 +186,4 @@ function simulate(db, world, fixture) {
       `Home strength ${H.strength.toFixed(1)} (incl. home advantage ${homeAdv}) vs away ${A.strength.toFixed(1)}; captaincy boosts H ${H.captainBoost.toFixed(2)} / A ${A.captainBoost.toFixed(2)}.`],
     keyMoments: [`Top score: ${(hIn.topScorers[0] || aIn.topScorers[0] || {}).player || '—'}`] };
 }
-module.exports = { simulate, teamStrength, fixturePitch, PITCH_EFFECT };
+module.exports = { simulate, teamStrength, computeFit, fixturePitch, PITCH_EFFECT };

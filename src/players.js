@@ -13,6 +13,63 @@
  * these players (UI shows '—'). Roles for the 19 late additions are
  * best-known values (their source listed prices only).
  */
+/**
+ * Real-life batting positions for the 44 original star templates,
+ * from their actual IPL/international roles. `positions` is the
+ * sorted set of batting positions the player is HAPPY to bat at
+ * (many real players genuinely bat in more than one spot — openers
+ * who also finish, floaters, pinch-hitters); `primary` is the
+ * most-preferred one and becomes prefBatPos. The match engine's
+ * fit logic (src/matchEngine.js) rewards any position inside the
+ * set and punishes positions outside it. Everyone else in the pool
+ * gets a set derived from role + batting tier (see the .map below).
+ */
+const STAR_POSITIONS = {
+  'Virat Kohli': { positions: [2, 3], primary: 3 },
+  'Rohit Sharma': { positions: [1, 2], primary: 1 },
+  'Jasprit Bumrah': { positions: [10, 11], primary: 11 },
+  'MS Dhoni': { positions: [5, 6, 7], primary: 6 },
+  'Hardik Pandya': { positions: [4, 5, 6], primary: 5 },
+  'KL Rahul': { positions: [1, 2, 4], primary: 1 },
+  'Rishabh Pant': { positions: [3, 4, 5], primary: 4 },
+  'Shubman Gill': { positions: [1, 2], primary: 1 },
+  'Ravindra Jadeja': { positions: [5, 6, 7], primary: 6 },
+  'Suryakumar Yadav': { positions: [3, 4], primary: 4 },
+  'Mohammed Siraj': { positions: [10, 11], primary: 11 },
+  'Kuldeep Yadav': { positions: [9, 10, 11], primary: 10 },
+  'Pat Cummins': { positions: [8, 9], primary: 8 },
+  'Steve Smith': { positions: [2, 3, 4], primary: 3 },
+  'Joe Root': { positions: [3, 4], primary: 3 },
+  'Ben Stokes': { positions: [4, 5, 6], primary: 5 },
+  'Jos Buttler': { positions: [1, 2], primary: 1 },
+  'Kane Williamson': { positions: [2, 3], primary: 3 },
+  'Trent Boult': { positions: [10, 11], primary: 11 },
+  'Rashid Khan': { positions: [7, 8], primary: 8 },
+  'Babar Azam': { positions: [1, 2], primary: 1 },
+  'Shaheen Afridi': { positions: [9, 10, 11], primary: 10 },
+  'David Warner': { positions: [1, 2], primary: 1 },
+  'Glenn Maxwell': { positions: [4, 5, 6], primary: 5 },
+  'Travis Head': { positions: [1, 2], primary: 1 },
+  'Mitchell Starc': { positions: [9, 10, 11], primary: 10 },
+  'Jofra Archer': { positions: [9, 10, 11], primary: 10 },
+  'Harry Brook': { positions: [4, 5], primary: 4 },
+  'Quinton de Kock': { positions: [1, 2], primary: 1 },
+  'Kagiso Rabada': { positions: [9, 10, 11], primary: 10 },
+  'Aiden Markram': { positions: [3, 4], primary: 4 },
+  'Heinrich Klaasen': { positions: [4, 5, 6], primary: 5 },
+  'Rachin Ravindra': { positions: [1, 2, 3], primary: 1 },
+  'Shakib Al Hasan': { positions: [3, 4, 5], primary: 4 },
+  'Wanindu Hasaranga': { positions: [6, 7, 8], primary: 7 },
+  'Axar Patel': { positions: [5, 6, 7], primary: 6 },
+  'Yashasvi Jaiswal': { positions: [1, 2], primary: 1 },
+  'Rinku Singh': { positions: [5, 6, 7], primary: 6 },
+  'Arshdeep Singh': { positions: [10, 11], primary: 11 },
+  'Tilak Varma': { positions: [3, 4, 5], primary: 4 },
+  'Abhishek Sharma': { positions: [1, 2], primary: 1 },
+  'Nicholas Pooran': { positions: [3, 4, 5], primary: 4 },
+  'Andre Russell': { positions: [5, 6, 7], primary: 6 },
+  'Sunil Narine': { positions: [1, 2, 7, 8], primary: 1 }, // pinch-opener who also finishes
+};
 module.exports = [
   ['Virat Kohli',37,'Batsman','India',93,14],['Rohit Sharma',39,'Batsman','India',92,13],
   ['Jasprit Bumrah',32,'Bowler','India',94,15],['MS Dhoni',45,'Wicket-Keeper','India',89,10],
@@ -427,6 +484,26 @@ module.exports = [
     else prefOvers = ['middle'];
   }
   const approach = batting >= 88 ? 'aggressive' : batting >= 76 ? 'balanced' : 'defensive';
+  // batPositions: the SET of batting positions this player is happy
+  // to bat at — real cricketers are multi-position, so fit is judged
+  // against the set, not a single slot. Stars use the hand-authored
+  // real-life sets above (and their primary overrides prefBatPos);
+  // the auction pool derives a set from role + batting tier, and the
+  // primary is pulled inside the set so prefBatPos ∈ batPositions
+  // always holds.
+  let batPositions;
+  const star = STAR_POSITIONS[name];
+  if (star) {
+    batPositions = star.positions;
+    prefBatPos = star.primary;
+  } else {
+    if (role === 'Batsman') batPositions = batting >= 86 ? pick([[1, 2], [2, 3]]) : batting >= 76 ? [3, 4, 5] : [5, 6];
+    else if (role === 'Wicket-Keeper') batPositions = batting >= 86 ? [1, 2] : [4, 5];
+    else if (role === 'All-Rounder') batPositions = batting >= 82 ? [4, 5, 6] : [5, 6, 7];
+    else batPositions = batting >= 70 ? [8, 9, 10] : [9, 10, 11]; // Bowler (handy lower-order hitters get the higher set)
+    if (!batPositions.includes(prefBatPos))
+      prefBatPos = batPositions.reduce((best, s) => (Math.abs(s - prefBatPos) < Math.abs(best - prefBatPos) ? s : best), batPositions[0]);
+  }
   return { id: 'player_' + (i + 1), name, age, role, nationality, rating, baseValue,
-    batting, bowling, leadership, prefBatPos, prefOvers, approach };
+    batting, bowling, leadership, prefBatPos, batPositions, prefOvers, approach };
 });

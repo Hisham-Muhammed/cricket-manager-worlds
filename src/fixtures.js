@@ -27,16 +27,26 @@ function generateFixtures(db, world) {
   allRounds.push(...leg1);
   if (legs === 2) allRounds.push(...leg1.map(round => round.map(([h, a]) => [a, h])));
   const start = new Date(world.seasonStartAt || world.startDate);
+  const fast = world.pace === 'fast';
   const [hh, mm] = (world.matchTime || '20:00').split(':').map(Number);
   const fixtures = [];
   allRounds.forEach((round, idx) => {
-    const when = new Date(start); when.setDate(when.getDate() + idx * (world.matchIntervalDays || 3));
-    when.setHours(hh, mm || 0, 0, 0);
+    let when;
+    if (fast) {
+      // Fast (test) pace: rounds are spaced by minutes from the season
+      // start (world.matchIntervalMinutes, default 10) and the
+      // tactical lock is 2 minutes before each match. A 10-club
+      // season (18 rounds) then runs end to end in ~3 hours.
+      when = new Date(start.getTime() + idx * (world.matchIntervalMinutes || 10) * 60000);
+    } else {
+      when = new Date(start); when.setDate(when.getDate() + idx * (world.matchIntervalDays || 3));
+      when.setHours(hh, mm || 0, 0, 0);
+    }
     for (const [home, away] of round) fixtures.push({
       id: id('fix'), worldId: world.id, round: idx + 1,
       homeMembershipId: home, awayMembershipId: away, competition: 'Premier League',
       scheduledAt: when.toISOString(), timezone: world.timezone || 'Asia/Kolkata',
-      tacticalLockAt: new Date(when.getTime() - 30 * 60000).toISOString(),
+      tacticalLockAt: new Date(when.getTime() - (fast ? 2 : 30) * 60000).toISOString(),
       status: 'SCHEDULED', result: null
     });
   });
