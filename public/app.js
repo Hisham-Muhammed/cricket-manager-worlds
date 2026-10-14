@@ -21,6 +21,11 @@ function avatarHTML(p,cls){const src=portraitFor(p);
  if(src)return `<img class="avatar ${cls||''}" src="${src}" alt="" loading="lazy">`;
  return `<span class="avatar avatar-ini ${cls||''}">${esc(initials(p&&p.name))}<b>${(p&&p.rating)||''}</b></span>`;}
 function pAvatar(a){return avatarHTML({...a.player,worldPlayerId:a.worldPlayerId});}
+// ---- detailed tactics helpers (preferences, phases) ----
+const PHASE_LABEL={powerplay:'Powerplay (1–6)',middle:'Middle (7–15)',death:'Death (16–20)'};
+function phaseLabel(n){return PHASE_LABEL[n]||n;}
+function cap1(s){return s?s[0].toUpperCase()+s.slice(1):s;}
+function prefShort(p){if(!p)return '';const o=(p.prefOvers&&p.prefOvers.length)?' · '+p.prefOvers.map(n=>({powerplay:'PP',middle:'Mid',death:'Death'}[n]||n)).join('/') :'';return `Pref #${p.prefBatPos ?? '—'}${o}`;}
 // Attribution for real Wikimedia Commons photos (detail page only).
 function photoCreditHTML(p){if(!p||!p.photoUrl)return '';
  const inner=`Photo: ${esc(p.photoCredit||'Wikimedia Commons')}${p.photoLicense?' · '+esc(p.photoLicense):''}`;
@@ -116,12 +121,52 @@ function squadPanelHTML(p,d){const inXI=d.xi.includes(p.worldPlayerId);
  <div class="kv"><span>Batting</span><b>${p.batting}</b></div>
  <div class="kv"><span>Bowling</span><b>${p.bowling}</b></div>
  <div class="kv"><span>Leadership</span><b>${p.leadership}</b></div>
+ <div class="kv"><span>Prefers to bat</span><b>#${p.prefBatPos ?? '—'}</b></div>
+ <div class="kv"><span>Preferred overs</span><b>${(p.prefOvers&&p.prefOvers.length)?p.prefOvers.map(phaseLabel).join(' + '):'—'}</b></div>
+ <div class="kv"><span>Default approach</span><b>${esc(cap1(p.approach||'balanced'))}</b></div>
  <div class="kv"><span>Form / Fitness / Morale</span><b>${p.form} / ${p.fitness} / ${p.morale}</b></div>
  <div class="kv"><span>Value</span><span class="goldv">${p.baseValue!=null?'₹'+p.baseValue+' Cr':'—'}</span></div>
  <div class="kv"><span>Status</span><b>${inXI?'Playing XI':'Squad'}</b></div></div>
  <div class="bidform" style="margin-top:10px"><button class="secondary" onclick="cap('${p.worldPlayerId}','captain')">Captain</button>
  <button class="secondary" onclick="cap('${p.worldPlayerId}','vice')">Vice-captain</button>
  <button onclick="openPlayer('${p.worldPlayerId}','Squad')">Player page →</button></div>`;}
+
+function squadTableHTML(d){return `<div class="tblwrap"><table id="squadTable"><tr><th>XI</th><th>Player</th><th>Role</th><th>OVR</th><th>Age</th><th>Value</th><th>Status</th><th>Form</th><th></th></tr>
+   ${d.squad.map(p=>`<tr class="clickable ${p.worldPlayerId===squadSel?'sel':''}" data-pid="${p.worldPlayerId}" onclick="selectSquadPlayer('${p.worldPlayerId}')"><td onclick="event.stopPropagation()"><input type="checkbox" class="xi" value="${p.worldPlayerId}" ${d.xi.includes(p.worldPlayerId)?'checked':''} style="width:auto"></td>
+   <td><span class="pcell">${avatarHTML(p)}<span><span class="pname">${esc(p.name)}</span> ${p.isCaptain?'<span class="badge cap">©</span>':''}${p.isViceCaptain?'<span class="badge cap">VC</span>':''}<br><span class="psub">${esc(p.nationality)} · ${prefShort(p)}</span></span></span></td>
+   <td>${esc(p.role)}</td><td><span class="ovr">${p.rating}</span></td><td>${p.age ?? '—'}</td><td>${p.baseValue!=null?'₹'+p.baseValue+' Cr':'—'}</td><td>${d.xi.includes(p.worldPlayerId)?'Playing XI':'Squad'}</td><td>${p.form}</td>
+   <td onclick="event.stopPropagation()"><button class="secondary" onclick="cap('${p.worldPlayerId}','captain')">Captain</button> <button class="secondary" onclick="cap('${p.worldPlayerId}','vice')">Vice-captain</button></td></tr>`).join('')}</table></div>`;}
+
+// ---- detailed tactics editors (Captain & Tactics screen) ----
+let tacOrder=[], tacPlan={}, tacApproach={};
+const bowlEligible=p=>p.role==='Bowler'||p.role==='All-Rounder'||(p.bowling||0)>=60;
+function tacPlayer(pid){return (squadCache&&squadCache.squad||[]).find(p=>p.worldPlayerId===pid);}
+function initTacState(d){const xiSet=new Set(d.xi);const saved=(d.tactics&&d.tactics.battingOrder)||[];
+ tacOrder=saved.filter(pid=>xiSet.has(pid));
+ const rest=d.xi.filter(pid=>!tacOrder.includes(pid)).map(tacPlayer).filter(Boolean)
+   .sort((a,b)=>(a.prefBatPos||11)-(b.prefBatPos||11)||(b.batting||0)-(a.batting||0));
+ tacOrder=[...tacOrder,...rest.map(p=>p.worldPlayerId)];
+ tacPlan={};Object.entries((d.tactics&&d.tactics.bowlingPlan)||{}).forEach(([pid,e])=>{tacPlan[pid]={pp:e.pp||0,mid:e.mid||0,death:e.death||0};});
+ tacApproach={};d.xi.forEach(pid=>{const p=tacPlayer(pid);tacApproach[pid]=((d.tactics&&d.tactics.playerApproach)||{})[pid]||(p&&p.approach)||'balanced';});}
+function tacOrderHTML(){if(!tacOrder.length)return '<p>Tick a playing XI in the squad table above first.</p>';
+ return tacOrder.map((pid,i)=>{const p=tacPlayer(pid);if(!p)return '';const diff=Math.abs((i+1)-(p.prefBatPos||i+1));
+  const fit=diff<=1?'<span class="badge" style="color:#7ee2a0">✓ happy</span>':`<span class="badge" style="color:#ffb35c">⚠ prefers #${p.prefBatPos}</span>`;
+  return `<div class="tacrow"><span class="tacpos">${i+1}</span>${avatarHTML(p)}<span class="tacname">${esc(p.name)}<br><span class="psub">${esc(p.role)} · Bat ${p.batting} · ${prefShort(p)}</span></span>${fit}
+  <select class="tacappr" onchange="setApproach('${pid}',this.value)">${['aggressive','balanced','defensive'].map(a=>`<option value="${a}" ${tacApproach[pid]===a?'selected':''}>${cap1(a)}</option>`).join('')}</select>
+  <span class="tacmv"><button class="secondary" onclick="moveTac(${i},-1)" ${i===0?'disabled':''}>▲</button><button class="secondary" onclick="moveTac(${i},1)" ${i===tacOrder.length-1?'disabled':''}>▼</button></span></div>`;}).join('');}
+function tacPlanTotals(){const t={pp:0,mid:0,death:0};Object.values(tacPlan).forEach(e=>{t.pp+=e.pp||0;t.mid+=e.mid||0;t.death+=e.death||0;});t.total=t.pp+t.mid+t.death;return t;}
+function tacPlanHTML(d){const elig=d.xi.map(tacPlayer).filter(p=>p&&bowlEligible(p));
+ if(!elig.length)return '<p>No bowlers in your XI yet — tick bowlers/all-rounders in the squad table and save.</p>';
+ const rows=elig.map(p=>{const e=tacPlan[p.worldPlayerId]||{pp:0,mid:0,death:0};const tot=(e.pp||0)+(e.mid||0)+(e.death||0);
+  const cell=(ph)=>`<span class="stepper sm"><button onclick="bowlStep('${p.worldPlayerId}','${ph}',-1)">−</button><b>${e[ph]||0}</b><button onclick="bowlStep('${p.worldPlayerId}','${ph}',1)">+</button></span>`;
+  return `<div class="tacrow"><span class="tacname" style="flex:1">${esc(p.name)}<br><span class="psub">Bowl ${p.bowling} · Pref: ${(p.prefOvers&&p.prefOvers.length)?p.prefOvers.map(phaseLabel).join(' + '):'—'}</span></span>
+  <span class="tacph">PP ${cell('pp')}</span><span class="tacph">Mid ${cell('mid')}</span><span class="tacph">Death ${cell('death')}</span><span class="tactot">${tot}/4</span></div>`;}).join('');
+ const t=tacPlanTotals();const warn=(t.pp>6||t.mid>9||t.death>5||t.total>20)?' style="color:#ffb35c"':'';
+ return rows+`<p${warn}>Totals — Powerplay <b>${t.pp}/6</b> · Middle <b>${t.mid}/9</b> · Death <b>${t.death}/5</b> · All overs <b>${t.total}/20</b>${t.total<20?` · the remaining ${20-t.total} over(s) go to your other bowlers automatically`:''}</p>`;}
+window.moveTac=(i,dir)=>{const j=i+dir;if(j<0||j>=tacOrder.length)return;[tacOrder[i],tacOrder[j]]=[tacOrder[j],tacOrder[i]];const h=$('#tacOrder');if(h)h.innerHTML=tacOrderHTML();};
+window.setApproach=(pid,val)=>{tacApproach[pid]=val;};
+window.bowlStep=(pid,ph,delta)=>{const e=tacPlan[pid]||(tacPlan[pid]={pp:0,mid:0,death:0});const tot=(e.pp||0)+(e.mid||0)+(e.death||0);
+ const nv=(e[ph]||0)+delta;if(nv<0||nv>4)return;if(delta>0&&tot>=4)return;e[ph]=nv;const h=$('#tacPlan');if(h&&squadCache)h.innerHTML=tacPlanHTML(squadCache);};
 
 async function render(){saveNav();const v=$('#view');$('#err').textContent='';refreshClubBlock();
  try{
@@ -230,7 +275,9 @@ async function render(){saveNav();const v=$('#view');$('#err').textContent='';re
      <div class="stat">Rating<b>${p.rating}</b></div><div class="stat">Batting<b>${p.batting}</b></div><div class="stat">Bowling<b>${p.bowling}</b></div>
      <div class="stat">Leadership<b>${p.leadership}</b></div><div class="stat">Base price<b>₹${p.baseValue} Cr</b></div>
      <div class="stat">Form<b>${p.form}</b></div><div class="stat">Fitness<b>${p.fitness}</b></div><div class="stat">Morale<b>${p.morale}</b></div>
-   </div></div></div></div>
+     <div class="stat">Prefers to bat<b>#${p.prefBatPos ?? '—'}</b></div><div class="stat">Preferred overs<b style="font-size:12px">${(p.prefOvers&&p.prefOvers.length)?p.prefOvers.map(phaseLabel).join(' + '):'—'}</b></div><div class="stat">Approach<b>${esc(cap1(p.approach||'balanced'))}</b></div>
+   </div>
+   <p style="margin-top:8px"><small>Players perform best in their preferred batting position and bowling phases — using them far from their preferences costs morale and form after the match (see the tactics report in the match result).</small></p></div></div></div>
    ${a?`<div class="panel"><h3>🔨 Auction</h3>
    <p>Status: <span class="pill">${esc(a.status)}</span> · Current price: <b style="color:var(--gold)">₹${a.currentPrice} Cr</b> · Leader: ${a.highestBid?(a.leaderUndisclosed?'<span class="undisc">Undisclosed</span>':esc(a.highestBidderClub)):'No bids yet'}
    <br>Ends: ${new Date(a.auctionEndsAt).toLocaleString()} (${countdown(a.auctionEndsAt,d.serverNow)} left) · ${a.bidsCount} bid(s)</p>
@@ -245,26 +292,37 @@ async function render(){saveNav();const v=$('#view');$('#err').textContent='';re
    ${d.bids.length?`<div class="tblwrap"><table><tr><th>Time</th><th>Manager</th><th>Club</th><th>Amount ₹ Cr</th><th>Status</th></tr>
    ${d.bids.map(b=>`<tr><td>${new Date(b.createdAt).toLocaleString()}</td><td>${b.undisclosed&&!b.mine?'<span class="undisc">Undisclosed</span>':esc(b.managerName)}${b.mine?' (you)':''}</td><td>${b.undisclosed&&!b.mine?'<span class="undisc">Undisclosed</span>':esc(b.clubName)}</td><td>${b.amount==null?'<span class="undisc">Undisclosed</span>':'₹'+b.amount}</td><td>${esc(b.status)}</td></tr>`).join('')}</table></div>`:'<p>No bids yet.</p>'}
    </div>`:'<div class="panel">No auction for this player.</div>'}`;}
-  else if(tab==='Squad'||tab==='Tactics'){const d=await api(`/api/worlds/${worldId}/squad`);squadCache=d;
+  else if(tab==='Squad'){const d=await api(`/api/worlds/${worldId}/squad`);squadCache=d;
    if(!d.squad.some(p=>p.worldPlayerId===squadSel))squadSel=(d.squad.find(p=>p.isCaptain)||d.squad.slice().sort((a,b)=>b.rating-a.rating)[0]||{}).worldPlayerId||null;
    const sel=d.squad.find(p=>p.worldPlayerId===squadSel);
    v.innerHTML=`<div class="split">
    <div class="panel"><h2>${esc(d.clubName)} — Squad (${d.squad.length} players) · Budget ₹${d.budget} Cr</h2>
    ${d.squad.length?'':'<p>Your squad is empty. Win players in the Auction.</p>'}
-   <div class="tblwrap"><table id="squadTable"><tr><th>XI</th><th>Player</th><th>Role</th><th>OVR</th><th>Age</th><th>Value</th><th>Status</th><th>Form</th><th></th></tr>
-   ${d.squad.map(p=>`<tr class="clickable ${p.worldPlayerId===squadSel?'sel':''}" data-pid="${p.worldPlayerId}" onclick="selectSquadPlayer('${p.worldPlayerId}')"><td onclick="event.stopPropagation()"><input type="checkbox" class="xi" value="${p.worldPlayerId}" ${d.xi.includes(p.worldPlayerId)?'checked':''} style="width:auto"></td>
-   <td><span class="pcell">${avatarHTML(p)}<span><span class="pname">${esc(p.name)}</span> ${p.isCaptain?'<span class="badge cap">©</span>':''}${p.isViceCaptain?'<span class="badge cap">VC</span>':''}<br><span class="psub">${esc(p.nationality)}</span></span></span></td>
-   <td>${esc(p.role)}</td><td><span class="ovr">${p.rating}</span></td><td>${p.age ?? '—'}</td><td>${p.baseValue!=null?'₹'+p.baseValue+' Cr':'—'}</td><td>${d.xi.includes(p.worldPlayerId)?'Playing XI':'Squad'}</td><td>${p.form}</td>
-   <td onclick="event.stopPropagation()"><button class="secondary" onclick="cap('${p.worldPlayerId}','captain')">Captain</button> <button class="secondary" onclick="cap('${p.worldPlayerId}','vice')">Vice-captain</button></td></tr>`).join('')}</table></div>
-   <p>Tick up to 11 players above as your Playing XI, then save. Captaincy lifts that player's morale and adds a chemistry/performance modifier in the match engine.</p>
+   ${squadTableHTML(d)}
+   <p>Tick up to 11 players above as your Playing XI, then save. Captaincy lifts that player's morale and adds a chemistry/performance modifier in the match engine. Set the batting order, bowling phases and per-player approach on the <b>Captain &amp; Tactics</b> screen.</p>
    <label>Batting approach</label><select id="tbat"><option>Balanced</option><option>Aggressive</option><option>Defensive</option></select>
    <button class="goldbtn" onclick="saveXI()">Save XI & Tactics</button></div>
    <div class="panel" id="squadPanel">${sel?squadPanelHTML(sel,d):'<h3>Player</h3><p>No players yet — win some in the Auction.</p>'}</div>
    </div>`;$('#tbat').value=d.tactics.battingApproach||'Balanced';}
+  else if(tab==='Tactics'){const d=await api(`/api/worlds/${worldId}/squad`);squadCache=d;initTacState(d);
+   v.innerHTML=`<div class="panel"><h2>🎯 Captain &amp; Tactics — ${esc(d.clubName)}</h2>
+   <p>Pick your XI, then set <b>where everyone bats</b>, <b>who bowls which overs</b> and <b>how each player plays</b>. Players used far from their preferred position/phases lose morale and form after the match — the match report carries a tactics report. Everything locks 30 minutes before your next match. If you change the XI ticks, save once and the editors below rebuild for the new XI.</p>
+   ${squadTableHTML(d)}
+   <label>Team batting approach</label><select id="tbat"><option>Balanced</option><option>Aggressive</option><option>Defensive</option></select></div>
+   <div class="split">
+   <div class="panel"><h3>🏏 Batting order &amp; player approach</h3><p>Move players with ▲▼. Each player's own approach sits next to their name — aggressive scores faster but risks their wicket.</p><div id="tacOrder">${tacOrderHTML()}</div></div>
+   <div class="panel"><h3>🎳 Bowling plan — who bowls which overs</h3><p>Phases: <b>PP</b> overs 1–6 (max 6), <b>Mid</b> 7–15 (max 9), <b>Death</b> 16–20 (max 5). No bowler can bowl more than 4 overs. Bowlers are happiest bowling their preferred phases.</p><div id="tacPlan">${tacPlanHTML(d)}</div></div>
+   </div>
+   <div class="panel"><h3>🏟 Home pitch</h3>
+   <p>Your home ground's default pitch — it applies to every home fixture unless you override a single match on the Fixtures screen (allowed until its tactical lock). A <b>batting</b> pitch lifts scores; a <b>bowling</b> pitch keeps them low and helps your bowlers.</p>
+   <div class="bidform"><span><label>Home pitch</label><br><select id="tacpitch"><option value="batting">Batting pitch</option><option value="balanced">Balanced</option><option value="bowling">Bowling pitch</option></select></span></div>
+   <button class="goldbtn" onclick="saveTactics()">Save XI &amp; Tactics</button></div>`;
+   $('#tbat').value=d.tactics.battingApproach||'Balanced';$('#tacpitch').value=d.tactics.homePitch||'balanced';}
   else if(tab==='Fixtures'){const d=await api(`/api/worlds/${worldId}/fixtures`);
-   v.innerHTML=`<div class="panel"><h2>📅 Fixtures & Match Centre</h2><p>No “Play Match” button — matches start automatically at their scheduled server time. Tactical lock: 30 minutes before start.</p>
-   <div class="tblwrap"><table><tr><th>Rd</th><th>Fixture</th><th>Scheduled</th><th>Status</th><th>Result / Report</th></tr>
-   ${d.fixtures.map(f=>`<tr><td>${f.round}</td><td><span class="fxcell"><span class="pcell">${crestHTML(f.homeClub,'sm')}<span>${esc(f.homeClub)}</span></span><span class="vsmid" style="font-size:12px">vs</span><span class="pcell">${crestHTML(f.awayClub,'sm')}<span>${esc(f.awayClub)}</span></span></span></td><td>${new Date(f.scheduledAt).toLocaleString()} ${esc(f.timezone)}${f.locked?' · 🔒 XI locked':''}</td><td><span class="pill">${esc(f.status)}</span></td>
+   v.innerHTML=`<div class="panel"><h2>📅 Fixtures & Match Centre</h2><p>No “Play Match” button — matches start automatically at their scheduled server time. Tactical lock: 30 minutes before start. The <b>home manager</b> prepares the pitch — set it per match below (until the lock) or set a standing home pitch on Captain &amp; Tactics.</p>
+   <div class="tblwrap"><table><tr><th>Rd</th><th>Fixture</th><th>Scheduled</th><th>Pitch</th><th>Status</th><th>Result / Report</th></tr>
+   ${d.fixtures.map(f=>`<tr><td>${f.round}</td><td><span class="fxcell"><span class="pcell">${crestHTML(f.homeClub,'sm')}<span>${esc(f.homeClub)}</span></span><span class="vsmid" style="font-size:12px">vs</span><span class="pcell">${crestHTML(f.awayClub,'sm')}<span>${esc(f.awayClub)}</span></span></span></td><td>${new Date(f.scheduledAt).toLocaleString()} ${esc(f.timezone)}${f.locked?' · 🔒 XI locked':''}</td>
+   <td>${f.isHome&&!f.result&&!f.locked?`<span class="bidform"><select id="pitch-${f.id}">${['batting','balanced','bowling'].map(pp=>`<option value="${pp}" ${f.pitch===pp?'selected':''}>${cap1(pp)}</option>`).join('')}</select><button class="secondary" onclick="setFixturePitch('${f.id}')">Set</button></span><br><small>${f.pitchSet?'Match pitch':'Your home default'}</small>`:`${cap1(f.pitch||'balanced')}${f.pitchSet?'':' (default)'}`}</td><td><span class="pill">${esc(f.status)}</span></td>
    <td>${f.result?`${f.result.home.runs}/${f.result.home.wickets} vs ${f.result.away.runs}/${f.result.away.wickets} — ${esc(f.result.summary)}<br>${esc((f.result.report||[]).join(' '))}`:'—'}</td></tr>`).join('')}</table></div></div>`;}
   else if(tab==='League'){const d=await api(`/api/worlds/${worldId}/league`);
    v.innerHTML=`<div class="panel"><h2>🏆 League Table</h2><div class="tblwrap"><table><tr><th>#</th><th>Club</th><th>P</th><th>W</th><th>L</th><th>T</th><th>NRR</th><th>Pts</th></tr>${d.table.map((r,i)=>`<tr class="${sideCache&&r.clubName===sideCache.clubName?'mine':''}"><td>${i+1}</td><td><span class="pcell">${crestHTML(r.clubName,'sm')}<span>${esc(r.clubName)}</span></span></td><td>${r.played}</td><td>${r.won}</td><td>${r.lost}</td><td>${r.tied}</td><td>${r.nrr}</td><td><b>${r.points}</b></td></tr>`).join('')}</table></div></div>`;}
@@ -300,4 +358,11 @@ window.withdrawBid=async id=>{try{await api(`/api/auctions/${id}/withdraw`,{meth
 window.watch=async id=>{await api(`/api/auctions/${id}/watchlist`,{method:'POST',body:'{}'});render();};
 window.cap=async(pid,role)=>{await api(`/api/worlds/${worldId}/captain`,{method:'POST',body:JSON.stringify({worldPlayerId:pid,role})});render();};
 window.saveXI=async()=>{try{const xi=[...document.querySelectorAll('.xi:checked')].map(x=>x.value);await api(`/api/worlds/${worldId}/xi`,{method:'POST',body:JSON.stringify({xi,tactics:{battingApproach:$('#tbat').value}})});alert('XI & tactics saved.');}catch(e){$('#err').textContent=e.message;}};
+window.saveTactics=async()=>{try{const xi=[...document.querySelectorAll('.xi:checked')].map(x=>x.value);
+ const order=tacOrder.filter(pid=>xi.includes(pid));xi.forEach(pid=>{if(!order.includes(pid))order.push(pid);});
+ const plan={};Object.entries(tacPlan).forEach(([pid,e])=>{if(xi.includes(pid)&&((e.pp||0)+(e.mid||0)+(e.death||0))>0)plan[pid]={pp:e.pp||0,mid:e.mid||0,death:e.death||0};});
+ const appr={};xi.forEach(pid=>{if(tacApproach[pid])appr[pid]=tacApproach[pid];});
+ await api(`/api/worlds/${worldId}/xi`,{method:'POST',body:JSON.stringify({xi,tactics:{battingApproach:$('#tbat').value,battingOrder:order,bowlingPlan:plan,playerApproach:appr,homePitch:$('#tacpitch').value}})});
+ alert('XI & tactics saved.');render();}catch(e){$('#err').textContent=e.message;}};
+window.setFixturePitch=async fid=>{try{const sel=document.getElementById('pitch-'+fid);await api(`/api/worlds/${worldId}/fixtures/${fid}/pitch`,{method:'POST',body:JSON.stringify({pitch:sel.value})});render();}catch(e){$('#err').textContent=e.message;}};
 boot(); setInterval(()=>{if(me)render();},30000); // refresh renders server state; it never advances game time itself

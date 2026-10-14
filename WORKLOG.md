@@ -313,3 +313,85 @@ First feedback from playing the live Render site, four features:
   the Google 302 carries the https PUBLIC_URL callback, and after a
   full process restart the same cookie passes `/api/auth/me` and the
   world-restore fetch — the exact calls `boot()`/`restoreNav()` make.
+
+### 2026-10-14 — Detailed tactics: player preferences, batting order, bowling phases, per-player approach, home pitch
+- **Player preferences (derived on the templates, `src/players.js`)**:
+  every one of the 409 templates now carries `prefBatPos` (1–11, from
+  role + batting rating: top-order stars 1–3, middle order 3–6,
+  finishers/lower order and tail-end bowlers 7–11), `prefOvers`
+  (bowlers/all-rounders only: strike bowlers get powerplay+death,
+  others middle-phase mixes) and a default `approach`
+  (aggressive/balanced/defensive from batting rating). Deterministic
+  per player; shown on the player page, the squad panel and as a
+  "Pref #N · PP/Mid/Death" line in the squad table. (Derived in
+  players.js like the runtime ratings — no schema/seed change.)
+- **Manager tactics (per membership, `src/tactics.js` + the existing
+  `POST /api/worlds/:id/xi`, same 30-minute tactical lock)**:
+  `tactics.battingOrder` (the XI ordered 1–11), `tactics.bowlingPlan`
+  ({playerId: {pp, mid, death}} overs per phase), `tactics.
+  playerApproach` (per-XI-player approach) and `tactics.homePitch`.
+  Server validation (`validateTactics`): order/plan/approach entries
+  must belong to the effective XI; only eligible bowlers (role
+  Bowler/All-Rounder or bowling ≥ 60) may be given overs; phase
+  totals capped at powerplay 6 / middle 9 / death 5, per-bowler ≤ 4,
+  innings ≤ 20. Partial plans are allowed — the engine bowls the rest
+  with the best available bowlers. Only known tactics keys are merged.
+- **Simulation (`src/matchEngine.js`)**: the sim now bats the XI in
+  the manager's order (top scorers come from the top of the order),
+  computes a bowling attack rating from the plan (overs-weighted,
+  misuse-penalised; unset plans use a preference-aware auto-plan),
+  and applies per-player approach (aggressive: stronger/faster but
+  more wickets; defensive: the reverse). **Preference fit**: batting
+  within ±1 of prefBatPos or ≥ half a bowler's overs in preferred
+  phases = happy (+2 morale); 2–3 positions away or a minority of
+  overs in preferred phases = mild misuse (−6 morale, −3 form,
+  −3 effective rating); 4+ away / almost no preferred-phase overs =
+  severe (−12/−10 morale, −6/−5 form, −6 rating); a first-choice
+  bowler (top-4 eligible, bowling 78+) left completely unused in a
+  set plan = −5 morale. Deltas are clamped (−12…+2 per match) and the
+  scheduler persists them on worldPlayers in `applyResult`, next to
+  the existing form/fitness drift. Results carry `tactics` misuse
+  counts and `moraleEffects`; the match report gains a "Pitch: …"
+  line and a per-team "Tactics report: …" line (which also flows into
+  the news feed).
+- **Home pitch**: `fixture.pitch` (per match) overrides the home
+  manager's standing `tactics.homePitch` (default 'balanced').
+  Routes: `POST /api/worlds/:id/pitch` (standing default) and
+  `POST /api/worlds/:id/fixtures/:fid/pitch` (home manager only —
+  403 for the away manager, 404 unknown fixture, 409 once played,
+  423 after the tactical lock). Sim effect: batting pitch ×1.12 runs
+  and −1 wicket, bowling pitch ×0.88 runs and +1.5 wickets. The
+  fixtures API returns the effective pitch (+ `pitchSet` / `isHome`)
+  and the Fixtures screen shows it, with an inline setter for the
+  home manager before the lock.
+- **AI managers**: `aiPickTeams` (now exported) also writes full
+  tactics at season start — batting order by prefBatPos, a 20-over
+  plan from the shared `buildAutoBowlingPlan`, each XI player's
+  default approach, and a fixed per-club home pitch.
+- **UI (Captain & Tactics screen, split from Squad)**: XI table plus
+  three editors — batting-order list with ▲▼ steppers, a happy/
+  prefers badge per player and a per-player approach select; bowling
+  plan steppers per eligible bowler with live phase totals
+  (PP x/6 · Mid x/9 · Death x/5 · total x/20); home-pitch select.
+  Squad screen keeps XI + captaincy + team approach. Phone-usable:
+  plain buttons/selects, no drag-and-drop.
+- Tests: suite extended 26 → **32 tests, all passing** (`npm test`),
+  `npm run check` clean (now also checks `src/tactics.js`). New:
+  preferences exist and are sane on all 409 templates; engine unit
+  tests (fabricated db) — a reversed order + Bumrah given only middle
+  overs cuts team strength/attack, misuses more players and costs
+  Bumrah −12 morale vs a sensible setup, and the same fixture scores
+  more on a batting pitch than a bowling pitch; aiPickTeams produces
+  a valid 20-over plan/order/approaches/pitch; API tests against
+  pre-seeded servers (db.json with squads + a fixture written before
+  boot) — happy-path save + persistence, 400s for powerplay overflow,
+  a 5-over bowler, non-XI entries in plan/order, an ineligible
+  bowler (bowling 42) and a bad approach value; pitch default +
+  per-fixture override + away-manager 403 + unknown fixture 404; and
+  the 30-minute lock rejecting both tactics saves and pitch changes
+  with 423.
+- Simplifications vs the original ask: bowling fit is judged on
+  phase shares (not exact over numbers per spell), and fit is only
+  judged on tactics the manager actually saved — with nothing saved
+  the engine's defaults apply and nobody gains or loses morale,
+  so new/casual managers are never punished for not micro-managing.
