@@ -161,7 +161,7 @@ test('joining with the wrong world password returns exactly "Incorrect world pas
   const r = await req(`/api/worlds/${worldId}/join`, {
     method: 'POST',
     cookie: cookieA,
-    body: { clubName: 'Kerala Kings', password: 'not-the-password' },
+    body: { clubName: 'Chennai Super Kings', password: 'not-the-password' },
   });
   assert.equal(r.status, 403);
   assert.equal(r.json.error, 'Incorrect world password.');
@@ -171,20 +171,20 @@ test('joining with the correct password starts with an EMPTY squad and budget 10
   const r = await req(`/api/worlds/${worldId}/join`, {
     method: 'POST',
     cookie: cookieA,
-    body: { clubName: 'Kerala Kings', password: WORLD_PASSWORD },
+    body: { clubName: 'Chennai Super Kings', password: WORLD_PASSWORD },
   });
   assert.equal(r.status, 201);
   assert.equal(r.json.budget, 100);
   assert.deepEqual(r.json.squad, []);
   assert.deepEqual(r.json.membership.xi, []);
-  assert.equal(r.json.membership.clubName, 'Kerala Kings');
+  assert.equal(r.json.membership.clubName, 'Chennai Super Kings');
 });
 
 test('a manager cannot join the same world twice (409)', async () => {
   const r = await req(`/api/worlds/${worldId}/join`, {
     method: 'POST',
     cookie: cookieA,
-    body: { clubName: 'Mumbai Warriors', password: WORLD_PASSWORD },
+    body: { clubName: 'Mumbai Indians', password: WORLD_PASSWORD },
   });
   assert.equal(r.status, 409);
 });
@@ -193,7 +193,7 @@ test('a club that is already taken cannot be taken again (409)', async () => {
   const r = await req(`/api/worlds/${worldId}/join`, {
     method: 'POST',
     cookie: cookieB,
-    body: { clubName: 'Kerala Kings', password: WORLD_PASSWORD },
+    body: { clubName: 'Chennai Super Kings', password: WORLD_PASSWORD },
   });
   assert.equal(r.status, 409);
   assert.equal(r.json.error, 'That club is already taken.');

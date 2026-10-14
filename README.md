@@ -73,9 +73,11 @@ with no external configuration.
    never stored or shown in plain text**; a wrong join password returns
    exactly `Incorrect world password.`
 4. **Join World** — view details → enter password if private → **choose an
-   available club** (Kerala Kings, Mumbai Warriors, Delhi Strikers, Bangalore
-   Titans, Chennai Superstars, + more) → **Waiting Room** (managers x/y,
-   rules, auction/season start times).
+   available club** — the original IPL franchises (Chennai Super Kings,
+   Mumbai Indians, Royal Challengers Bengaluru, Kolkata Knight Riders,
+   Rajasthan Royals, Sunrisers Hyderabad, Delhi Capitals, Punjab Kings,
+   Lucknow Super Giants, Gujarat Titans) → **Waiting Room** (managers
+   x/y, rules, auction/season start times).
 5. **No initial squads.** Every manager starts with an empty squad and the
    same **₹100 Cr** budget.
 6. **Player Auction Market** — seeded with the real player database (Virat

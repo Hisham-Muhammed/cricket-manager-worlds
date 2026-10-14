@@ -18,7 +18,7 @@ async function render(){const v=$('#view');$('#err').textContent='';
    ${d.worlds.map(w=>`<tr><td>${esc(w.name)} ${w.isPrivate?'<span class="lock">🔒 Private</span>':''}</td><td>${esc(w.creatorName)}</td><td>${w.managersCount}/${w.numberOfClubs}</td><td><span class="pill">${esc(w.state)}</span></td><td>${new Date(w.startDate).toLocaleString()}</td><td>${esc(w.format)}</td><td><button onclick="openWorld('${w.id}')">View / Join</button></td></tr>`).join('')}</table></div>
    <div class="card"><h3>Create World</h3>
    <input id="wname" placeholder="World name"><input id="wdesc" placeholder="Description">
-   <label>Number of clubs</label><input id="wnum" type="number" value="12" min="2" max="12">
+   <label>Number of clubs</label><input id="wnum" type="number" value="10" min="2" max="10">
    <label>Format</label><input id="wfmt" value="League (Home & Away)">
    <label>Match interval (days)</label><input id="wint" type="number" value="3" min="1" max="7">
    <label>Match time</label><input id="wtime" value="20:00">

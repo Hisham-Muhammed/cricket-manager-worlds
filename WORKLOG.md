@@ -76,3 +76,14 @@ actually done and reviewed, in the order it happened.
     the local store instead of crashing.
 - Next: live end-to-end test of supabase mode against the real
   project, then migration step 2 (worlds/memberships).
+
+### 2026-10-13 — Original IPL team names (GitHub codebase)
+- The invented club names are replaced with the 10 original IPL
+  franchises: Chennai Super Kings, Mumbai Indians, Royal Challengers
+  Bengaluru, Kolkata Knight Riders, Rajasthan Royals, Sunrisers
+  Hyderabad, Delhi Capitals, Punjab Kings, Lucknow Super Giants,
+  Gujarat Titans. World size now clamps to the club list (max 10).
+- Tests updated and passing 11/11.
+- Queued for this codebase (landing first in the hosted game): AI
+  managers to fill empty clubs so a world is playable solo, and a
+  creator "start anytime" control for worlds.

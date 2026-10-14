@@ -10,7 +10,7 @@ const { startScheduler, tick } = require('./scheduler');
 const supa = require('./supabase');
 
 const SECRET = process.env.SESSION_SECRET || 'dev-only-change-me';
-const CLUBS = ['Kerala Kings','Mumbai Warriors','Delhi Strikers','Bangalore Titans','Chennai Superstars','Kolkata Knights','Hyderabad Hurricanes','Rajasthan Royals XI','Punjab Lions','Lucknow Giants','Gujarat Titans','Pune Panthers'];
+const CLUBS = ['Chennai Super Kings','Mumbai Indians','Royal Challengers Bengaluru','Kolkata Knight Riders','Rajasthan Royals','Sunrisers Hyderabad','Delhi Capitals','Punjab Kings','Lucknow Super Giants','Gujarat Titans']; // the original IPL franchises
 const START_BUDGET = 100;
 
 const app = express();
@@ -192,7 +192,7 @@ app.post('/api/worlds', auth, (req, res) => {
   const db = load();
   const start = b.startDate ? new Date(b.startDate) : new Date(Date.now() + 24 * 3600 * 1000);
   const w = { id: id('world'), name: b.name, description: b.description || '', creatorId: req.user.id,
-    numberOfClubs: Math.min(20, Math.max(2, parseInt(b.numberOfClubs || 12, 10))),
+    numberOfClubs: Math.min(CLUBS.length, Math.max(2, parseInt(b.numberOfClubs || 10, 10))),
     format: b.format || 'League (Home & Away)', competitionStructure: b.competitionStructure || 'Round-robin league',
     matchIntervalDays: Math.min(7, Math.max(1, parseInt(b.matchIntervalDays || 3, 10))), matchTime: b.matchTime || '20:00',
     timezone: b.timezone || 'Asia/Kolkata', seasonLength: b.seasonLength || '1 season',
