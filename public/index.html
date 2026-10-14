@@ -13,6 +13,7 @@
       <p class="login-tag">Build Your Team<br>Make Big Decisions<br>Compete in a Real Cricket World</p>
     </div>
     <div class="login-card">
+     <div id="authForm">
       <div class="auth-tabs">
         <button id="tabSignIn" class="atab on" type="button">Sign In</button>
         <button id="tabRegister" class="atab" type="button">Create Account</button>
@@ -26,6 +27,17 @@
       <button id="loginBtn" class="goldbtn bigbtn">Sign In</button>
       <button id="regBtn" class="goldbtn bigbtn hidden">Create Account</button>
       <p class="sub login-note">New manager? Your first screen is the Game World Lobby — never a club dashboard. Google sign-in requires GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET in .env — without them the button explains the configuration needed instead of fake-logging you in.</p>
+     </div>
+     <div id="otpView" class="hidden">
+      <h2 class="otp-title">Confirm your email</h2>
+      <p class="sub login-note">We sent a 6-digit confirmation code to <b id="otpEmailLabel"></b>. Enter it here to prove the inbox is really yours — the account works only after this step.</p>
+      <div id="otpErr" class="err"></div>
+      <div id="otpInfo" class="otp-info"></div>
+      <label>Confirmation code</label><input id="otpCode" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="••••••">
+      <button id="otpBtn" class="goldbtn bigbtn">Verify &amp; Continue</button>
+      <button id="otpResend" class="secondary bigbtn" type="button">Resend code</button>
+      <button id="otpBack" class="secondary bigbtn" type="button">← Back to Sign In</button>
+     </div>
     </div>
   </div>
 </section>

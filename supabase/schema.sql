@@ -30,6 +30,7 @@ create table if not exists public.managers (
   name          text not null,
   email         text not null unique,
   provider      text not null default 'email' check (provider in ('email','google')),
+  email_verified boolean not null default true, -- email OTP confirmation: registration sets this false and the app flips it true once the emailed 6-digit code is verified; default true so pre-existing/Google profiles are never locked out (existing projects: alter table public.managers add column if not exists email_verified boolean not null default true;)
   profile_image text default '',
   stats         jsonb not null default '{"matchesManaged":0,"wins":0,"auctionsWon":0}'::jsonb,
   trophies      jsonb not null default '[]'::jsonb,

@@ -75,6 +75,10 @@ header.top{background:linear-gradient(180deg,#0d2148,#081426);color:#fff;padding
 .ordiv:before,.ordiv:after{content:"";flex:1;border-top:1px solid var(--border)}
 .login-card .err:not(:empty){margin-bottom:10px;font-weight:600}
 .login-note{font-size:12px;margin:14px 0 0}
+.otp-title{margin:2px 0 6px;font-size:20px}
+.otp-info{color:var(--green);font-weight:600}
+.otp-info:not(:empty){margin-bottom:10px}
+#otpCode{letter-spacing:.4em;font-size:20px;text-align:center}
 
 /* ---------- layout ---------- */
 main{max-width:1400px;margin:0 auto;padding:14px}
@@ -202,6 +206,18 @@ a.plink:hover{text-decoration:underline;color:var(--gold)}
 .photocredit{font-size:11px;color:var(--muted);margin-top:6px;text-align:center}
 .photocredit a{color:var(--muted);text-decoration:underline}
 .dbfoot{font-size:11px;color:var(--muted);margin:10px 0 0}
+/* detailed tactics editors */
+.tacrow{display:flex;align-items:center;gap:9px;padding:7px 4px;border-bottom:1px solid var(--border);flex-wrap:wrap}
+.tacrow .avatar{width:34px;height:34px}
+.tacpos{font-weight:900;color:var(--gold);width:22px;text-align:center;font-size:16px}
+.tacname{flex:1;min-width:130px;font-weight:700}
+.tacappr{width:auto;margin:0;padding:6px}
+.tacmv{display:flex;flex-direction:column;gap:3px}
+.tacmv button{padding:1px 9px;font-size:11px;line-height:1.5}
+.tacph{display:flex;align-items:center;gap:5px;font-size:12px;font-weight:700;color:#c9daf2}
+.stepper.sm button{width:26px;padding:3px 0;font-size:14px}
+.stepper.sm b{min-width:16px;text-align:center;font-size:14px}
+.tactot{font-weight:900;color:var(--gold);min-width:34px;text-align:right}
 .badge{display:inline-block;border-radius:99px;padding:1px 8px;font-size:11px;font-weight:800;border:1px solid var(--border);background:#13294d;color:#c9daf2}
 .badge.cap{background:rgba(240,182,74,.18);color:var(--gold);border-color:rgba(240,182,74,.6)}
 .statgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:8px;margin-top:12px}
