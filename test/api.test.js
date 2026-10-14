@@ -538,6 +538,286 @@ test('bug 3 (SPA): nav persistence helpers round-trip the saved view/world/playe
   assert.equal(sandbox.__nav.loadNav(), null, 'logout clears the saved view');
 });
 
+// ---------- detailed tactics: preferences, validation, pitch, morale ----------
+
+const bcryptjs = require('bcryptjs');
+const PLAYERS_T = require('../src/players');
+const { simulate: simMatch, teamStrength } = require('../src/matchEngine');
+const { aiPickTeams } = require('../src/scheduler');
+const { PHASE_CAP } = require('../src/tactics');
+
+test('player templates carry derived preferences (prefBatPos / prefOvers / approach)', () => {
+  assert.equal(PLAYERS_T.length, 409);
+  for (const p of PLAYERS_T) {
+    assert.ok(Number.isInteger(p.prefBatPos) && p.prefBatPos >= 1 && p.prefBatPos <= 11, `${p.name} prefBatPos`);
+    assert.ok(['aggressive', 'balanced', 'defensive'].includes(p.approach), `${p.name} approach`);
+    assert.ok(Array.isArray(p.prefOvers), `${p.name} prefOvers`);
+    if (p.role === 'Bowler' || p.role === 'All-Rounder')
+      assert.ok(p.prefOvers.length >= 1 && p.prefOvers.every(x => ['powerplay', 'middle', 'death'].includes(x)), `${p.name} bowler prefOvers`);
+  }
+  const bumrah = PLAYERS_T.find(p => p.name === 'Jasprit Bumrah');
+  assert.deepEqual(bumrah.prefOvers, ['powerplay', 'death'], 'a strike bowler opens and closes');
+  const kohli = PLAYERS_T.find(p => p.name === 'Virat Kohli');
+  assert.ok(kohli.prefBatPos <= 3, 'a top-order star prefers the top of the order');
+  assert.equal(kohli.approach, 'aggressive');
+  const tail = PLAYERS_T.find(p => p.name === 'Raj Limbani');
+  assert.ok(tail.prefBatPos >= 9, 'a tail-end bowler prefers the tail');
+});
+
+// Fabricated two-team world for engine tests (no server needed).
+function fakeMatchDb(homeTactics) {
+  const names = ['Virat Kohli', 'Rohit Sharma', 'Shubman Gill', 'Rishabh Pant', 'Hardik Pandya',
+    'Ravindra Jadeja', 'Axar Patel', 'Kuldeep Yadav', 'Jasprit Bumrah', 'Mohammed Siraj', 'Arshdeep Singh'];
+  const tpl = n => PLAYERS_T.find(p => p.name === n);
+  const mk = (prefix, mid) => names.map((n, i) => ({ id: prefix + i, worldId: 'w1', templateId: tpl(n).id,
+    ownerMembershipId: mid, status: 'OWNED', form: 60, fitness: 100, morale: 70 }));
+  const hwps = mk('wp', 'memH'), awps = mk('wa', 'memA');
+  const home = { id: 'memH', worldId: 'w1', userId: 'u1', clubName: 'Home XI', xi: hwps.map(w => w.id),
+    captainId: 'wp0', viceCaptainId: 'wp1', tactics: homeTactics };
+  const away = { id: 'memA', worldId: 'w1', userId: 'u2', clubName: 'Away XI', xi: awps.map(w => w.id), captainId: 'wa0', tactics: {} };
+  return { users: [], worlds: [{ id: 'w1' }], memberships: [home, away],
+    worldPlayers: [...hwps, ...awps], auctions: [], bids: [], fixtures: [], events: [], notifications: [], news: [], watchlist: [], league: [] };
+}
+const goodTacticsFor = db => {
+  const merged = db.worldPlayers.filter(p => p.ownerMembershipId === 'memH')
+    .map(w => ({ ...PLAYERS_T.find(t => t.id === w.templateId), id: w.id }));
+  const { buildAutoBowlingPlan } = require('../src/tactics');
+  return { battingApproach: 'Balanced', homePitch: 'balanced',
+    battingOrder: [...merged].sort((a, b) => a.prefBatPos - b.prefBatPos || b.batting - a.batting).map(p => p.id),
+    bowlingPlan: buildAutoBowlingPlan(merged), playerApproach: {} };
+};
+
+test('match engine: badly misused players lose morale and team strength vs a sensible setup', () => {
+  const dbC = fakeMatchDb(null); dbC.memberships[0].tactics = goodTacticsFor(dbC);
+  const good = dbC.memberships[0].tactics;
+  // Treatment: reverse the batting order (tail opens, openers at 10-11)
+  // and give Bumrah (prefers powerplay/death) only middle overs.
+  const bad = { ...good, battingOrder: [...good.battingOrder].reverse(), bowlingPlan: { wp8: { pp: 0, mid: 4, death: 0 } } };
+  const dbT = fakeMatchDb(bad);
+  const fix = { id: 'fix_tactics', worldId: 'w1', homeMembershipId: 'memH', awayMembershipId: 'memA', status: 'SCHEDULED', pitch: null };
+
+  const cS = teamStrength(dbC, 'w1', dbC.memberships[0]);
+  const tS = teamStrength(dbT, 'w1', dbT.memberships[0]);
+  assert.ok(tS.strength < cS.strength, `misuse should cost in-match strength (${tS.strength} < ${cS.strength})`);
+  assert.ok(tS.attack < cS.attack, 'bowling a strike bowler in the wrong phases weakens the attack');
+
+  const rc = simMatch(dbC, dbC.worlds[0], fix);
+  const rt = simMatch(dbT, dbT.worlds[0], fix);
+  assert.ok(rt.tactics.home.misused > rc.tactics.home.misused, 'the reversed order misuses more players');
+  const bumrahBad = rt.moraleEffects.find(e => e.worldPlayerId === 'wp8');
+  const bumrahGood = rc.moraleEffects.find(e => e.worldPlayerId === 'wp8');
+  assert.ok(bumrahBad && bumrahBad.moraleDelta <= -10, `Bumrah badly misused should lose serious morale, got ${bumrahBad && bumrahBad.moraleDelta}`);
+  assert.ok(!bumrahGood || bumrahGood.moraleDelta > bumrahBad.moraleDelta, 'the sensible setup treats Bumrah better');
+  assert.ok(rt.report.some(l => /Tactics report: Home XI used \d+ players? out of position/.test(l)), 'the match report carries the tactics report');
+  assert.ok(rt.report.some(l => l.startsWith('Pitch:')), 'the match report names the pitch');
+});
+
+test('match engine: a batting pitch out-scores a bowling pitch for the same fixture', () => {
+  const db = fakeMatchDb(null); db.memberships[0].tactics = goodTacticsFor(db);
+  const base = { id: 'fix_pitch', worldId: 'w1', homeMembershipId: 'memH', awayMembershipId: 'memA', status: 'SCHEDULED' };
+  const bat = simMatch(db, db.worlds[0], { ...base, pitch: 'batting' });
+  const bowl = simMatch(db, db.worlds[0], { ...base, pitch: 'bowling' });
+  assert.equal(bat.pitch, 'batting');
+  assert.equal(bowl.pitch, 'bowling');
+  assert.ok(bat.home.runs + bat.away.runs > bowl.home.runs + bowl.away.runs,
+    `batting pitch totals (${bat.home.runs}+${bat.away.runs}) should beat bowling pitch (${bowl.home.runs}+${bowl.away.runs})`);
+  assert.ok(bat.report.some(l => l === 'Pitch: Batting.'));
+});
+
+test('AI managers generate valid detailed tactics at season start (aiPickTeams)', () => {
+  const wps = PLAYERS_T.slice(0, 15).map((t, i) => ({ id: 'awp' + i, worldId: 'w1', templateId: t.id,
+    ownerMembershipId: 'memAI', status: 'OWNED', form: 50, fitness: 100, morale: 70 }));
+  const m = { id: 'memAI', worldId: 'w1', userId: 'uai', clubName: 'Mumbai Indians', ai: true, xi: [], tactics: {}, captainId: null };
+  const db = { users: [], worlds: [{ id: 'w1' }], memberships: [m], worldPlayers: wps,
+    auctions: [], bids: [], fixtures: [], events: [], notifications: [], news: [], watchlist: [], league: [] };
+  aiPickTeams(db, db.worlds[0]);
+  assert.equal(m.xi.length, 11);
+  assert.equal(m.tactics.battingOrder.length, 11, 'AI sets a full batting order');
+  assert.deepEqual([...m.tactics.battingOrder].sort(), [...m.xi].sort(), 'the order is exactly the XI');
+  const totals = { pp: 0, mid: 0, death: 0 };
+  for (const e of Object.values(m.tactics.bowlingPlan)) { totals.pp += e.pp; totals.mid += e.mid; totals.death += e.death;
+    assert.ok(e.pp + e.mid + e.death <= 4, 'no AI bowler exceeds 4 overs'); }
+  assert.ok(totals.pp <= PHASE_CAP.pp && totals.mid <= PHASE_CAP.mid && totals.death <= PHASE_CAP.death, 'AI plan respects phase caps');
+  assert.equal(totals.pp + totals.mid + totals.death, 20, 'AI plan covers all 20 overs');
+  assert.equal(Object.keys(m.tactics.playerApproach).length, 11, 'AI sets an approach per XI player');
+  assert.ok(['batting', 'balanced', 'bowling'].includes(m.tactics.homePitch), 'AI has a home pitch');
+});
+
+// Seeded servers: a db.json with squads + fixtures written BEFORE boot
+// (db.load() reads the file at startup), so tactics routes can be
+// exercised end-to-end without playing through a whole auction.
+async function spawnSeededServer(port, seed) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cmw-seed-'));
+  fs.writeFileSync(path.join(dir, 'db.json'), JSON.stringify(seed));
+  const srv = spawn(process.execPath, ['src/server.js'], {
+    cwd: ROOT,
+    env: { ...process.env, PORT: String(port), DATABASE: path.join(dir, 'db.json'),
+      DATABASE_MODE: 'local', SESSION_SECRET: 'test-secret',
+      SUPABASE_URL: '', SUPABASE_ANON_KEY: '', SUPABASE_SERVICE_ROLE_KEY: '',
+      SCHEDULER_INTERVAL_MS: '3600000' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let log = '';
+  srv.stdout.on('data', d => { log += d; });
+  srv.stderr.on('data', d => { log += d; });
+  const deadline = Date.now() + 20000;
+  while (Date.now() < deadline) {
+    try { const r = await fetch(`http://127.0.0.1:${port}/api/server-time`); if (r.ok) return { srv, dir }; }
+    catch { /* not up yet */ }
+    await new Promise(r => setTimeout(r, 250));
+  }
+  srv.kill('SIGKILL');
+  throw new Error('seeded server did not start:\n' + log);
+}
+async function reqOn(port, pathname, { method = 'GET', body, cookie } = {}) {
+  const res = await fetch(`http://127.0.0.1:${port}` + pathname, {
+    method, headers: { ...(body ? { 'Content-Type': 'application/json' } : {}), ...(cookie ? { Cookie: cookie } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  let json = null;
+  try { json = await res.json(); } catch { /* non-JSON */ }
+  const sc = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
+  const tc = sc.find(c => c.startsWith('token='));
+  return { status: res.status, json, cookie: tc ? tc.split(';')[0] : null };
+}
+const loginOn = async (port, email) => {
+  const r = await reqOn(port, '/api/auth/login', { method: 'POST', body: { email, password: 'secret1' } });
+  assert.equal(r.status, 200, `login for ${email}`);
+  return r.cookie;
+};
+function tacticsSeed(locked) {
+  const hash = bcryptjs.hashSync('secret1', 4);
+  const users = [
+    { id: 'u_s1', name: 'Seed One', email: 'seed1@example.com', passwordHash: hash, provider: 'email', profileImage: '', createdAt: new Date().toISOString(), stats: {}, trophies: [], history: [] },
+    { id: 'u_s2', name: 'Seed Two', email: 'seed2@example.com', passwordHash: hash, provider: 'email', profileImage: '', createdAt: new Date().toISOString(), stats: {}, trophies: [], history: [] },
+  ];
+  const starIds = PLAYERS_T.slice(0, 15).map(t => t.id); // player_1..15: Kohli..Joe Root era stars
+  const desai = PLAYERS_T.find(p => p.name === 'Aarya Desai'); // low-rated batsman: bowling 42 — cannot be given overs
+  const mkWps = (prefix, mid, tplIds) => tplIds.map((tid, i) => ({ id: prefix + (i + 1), worldId: 'w_seed', templateId: tid,
+    ownerMembershipId: mid, status: 'OWNED', form: 55, fitness: 100, morale: 70 }));
+  const wp1 = mkWps('swp', 'mem_s1', [...starIds, desai.id]);
+  const wp2 = mkWps('awp', 'mem_s2', starIds);
+  const now = Date.now();
+  const sched = new Date(now + (locked ? 10 * 60000 : 2 * 24 * 3600 * 1000)).toISOString();
+  const lockAt = new Date(new Date(sched).getTime() - 30 * 60000).toISOString();
+  return {
+    users,
+    worlds: [{ id: 'w_seed', name: 'Seed League', description: '', creatorId: 'u_s1', numberOfClubs: 2,
+      format: 'League (Home & Away)', competitionStructure: 'Round-robin league', matchIntervalDays: 3, matchTime: '20:00',
+      timezone: 'Asia/Kolkata', seasonLength: '1 season', startDate: new Date(now - 86400000).toISOString(),
+      auctionStartAt: new Date(now - 86400000).toISOString(), seasonStartAt: new Date(now - 3600000).toISOString(),
+      passwordHash: null, aiFill: false, state: 'ACTIVE_SEASON', createdAt: new Date(now - 86400000).toISOString() }],
+    memberships: [
+      { id: 'mem_s1', worldId: 'w_seed', userId: 'u_s1', clubName: 'Chennai Super Kings', budget: 42, xi: wp1.slice(0, 11).map(w => w.id),
+        tactics: { formation: 'Balanced', battingApproach: 'Balanced', bowlingApproach: 'Balanced' }, captainId: 'swp1', viceCaptainId: 'swp2', joinedAt: new Date().toISOString(), lastSeenAt: new Date().toISOString() },
+      { id: 'mem_s2', worldId: 'w_seed', userId: 'u_s2', clubName: 'Mumbai Indians', budget: 42, xi: wp2.slice(0, 11).map(w => w.id),
+        tactics: { formation: 'Balanced', battingApproach: 'Balanced', bowlingApproach: 'Balanced' }, captainId: 'awp1', viceCaptainId: 'awp2', joinedAt: new Date().toISOString(), lastSeenAt: new Date().toISOString() },
+    ],
+    worldPlayers: [...wp1, ...wp2],
+    auctions: [], bids: [],
+    fixtures: [{ id: 'fix_seed', worldId: 'w_seed', round: 1, homeMembershipId: 'mem_s1', awayMembershipId: 'mem_s2',
+      competition: 'Premier League', scheduledAt: sched, timezone: 'Asia/Kolkata', tacticalLockAt: lockAt, status: 'SCHEDULED', result: null }],
+    events: [], notifications: [], news: [], watchlist: [],
+    league: [
+      { id: 'lg1', worldId: 'w_seed', membershipId: 'mem_s1', played: 0, won: 0, lost: 0, tied: 0, points: 0, runsFor: 0, runsAgainst: 0, nrr: 0 },
+      { id: 'lg2', worldId: 'w_seed', membershipId: 'mem_s2', played: 0, won: 0, lost: 0, tied: 0, points: 0, runsFor: 0, runsAgainst: 0, nrr: 0 },
+    ],
+  };
+}
+
+test('tactics API: save order/plan/approach, validation errors, and home pitch routes', async () => {
+  const { srv, dir } = await spawnSeededServer(3225, tacticsSeed(false));
+  try {
+    const c1 = await loginOn(3225, 'seed1@example.com');
+    const c2 = await loginOn(3225, 'seed2@example.com');
+
+    const squad = await reqOn(3225, '/api/worlds/w_seed/squad', { cookie: c1 });
+    assert.equal(squad.status, 200);
+    assert.equal(squad.json.xi.length, 11);
+    assert.equal(squad.json.tactics.homePitch, 'balanced', 'home pitch defaults to balanced');
+    const byTpl = tid => squad.json.squad.find(p => p.id === tid);
+    assert.ok(byTpl('player_1').prefBatPos >= 1, 'squad players expose their preferences');
+    assert.ok(Array.isArray(byTpl('player_3').prefOvers) && byTpl('player_3').prefOvers.includes('death'));
+    const wp = tid => byTpl(tid).worldPlayerId;
+    const xi = squad.json.xi;
+
+    const plan = { [wp('player_3')]: { pp: 2, mid: 0, death: 2 }, [wp('player_11')]: { pp: 2, mid: 1, death: 1 },
+      [wp('player_9')]: { pp: 1, mid: 2, death: 1 }, [wp('player_5')]: { pp: 1, mid: 2, death: 0 }, [wp('player_1')]: { pp: 0, mid: 1, death: 0 } };
+    const saveOk = await reqOn(3225, '/api/worlds/w_seed/xi', { method: 'POST', cookie: c1,
+      body: { xi, tactics: { battingOrder: xi, bowlingPlan: plan, playerApproach: { [wp('player_1')]: 'aggressive' } } } });
+    assert.equal(saveOk.status, 200, JSON.stringify(saveOk.json));
+    assert.equal(saveOk.json.tactics.battingOrder.length, 11);
+    assert.equal(saveOk.json.tactics.playerApproach[wp('player_1')], 'aggressive');
+    const after = await reqOn(3225, '/api/worlds/w_seed/squad', { cookie: c1 });
+    assert.equal(after.json.tactics.bowlingPlan[wp('player_3')].death, 2, 'the plan persists');
+
+    // Validation: powerplay overflow (4+3 = 7 > 6)
+    const ppOver = await reqOn(3225, '/api/worlds/w_seed/xi', { method: 'POST', cookie: c1,
+      body: { tactics: { bowlingPlan: { [wp('player_3')]: { pp: 4, mid: 0, death: 0 }, [wp('player_11')]: { pp: 3, mid: 0, death: 0 } } } } });
+    assert.equal(ppOver.status, 400); assert.match(ppOver.json.error, /Powerplay has only 6 overs/);
+    // Validation: one bowler over 4 overs total
+    const five = await reqOn(3225, '/api/worlds/w_seed/xi', { method: 'POST', cookie: c1,
+      body: { tactics: { bowlingPlan: { [wp('player_3')]: { pp: 4, mid: 0, death: 1 } } } } });
+    assert.equal(five.status, 400); assert.match(five.json.error, /more than 4 overs/);
+    // Validation: a squad player who is not in the XI cannot be planned / ordered
+    const squadOnly = squad.json.squad.find(p => !xi.includes(p.worldPlayerId) && p.id !== 'player_45');
+    const notXi = await reqOn(3225, '/api/worlds/w_seed/xi', { method: 'POST', cookie: c1,
+      body: { tactics: { bowlingPlan: { [squadOnly.worldPlayerId]: { pp: 0, mid: 1, death: 0 } } } } });
+    assert.equal(notXi.status, 400); assert.match(notXi.json.error, /playing XI/);
+    const orderNotXi = await reqOn(3225, '/api/worlds/w_seed/xi', { method: 'POST', cookie: c1,
+      body: { tactics: { battingOrder: [...xi.slice(0, 10), squadOnly.worldPlayerId] } } });
+    assert.equal(orderNotXi.status, 400); assert.match(orderNotXi.json.error, /playing XI/);
+    // Validation: a player who cannot bowl cannot be given overs
+    const desai = squad.json.squad.find(p => p.name === 'Aarya Desai');
+    const xiWithDesai = [...xi.slice(0, 10), desai.worldPlayerId];
+    const ineligible = await reqOn(3225, '/api/worlds/w_seed/xi', { method: 'POST', cookie: c1,
+      body: { xi: xiWithDesai, tactics: { bowlingPlan: { [desai.worldPlayerId]: { pp: 0, mid: 1, death: 0 } } } } });
+    assert.equal(ineligible.status, 400); assert.match(ineligible.json.error, /Only bowlers and all-rounders/);
+    // Validation: unknown approach value
+    const badAppr = await reqOn(3225, '/api/worlds/w_seed/xi', { method: 'POST', cookie: c1,
+      body: { tactics: { playerApproach: { [wp('player_1')]: 'wild' } } } });
+    assert.equal(badAppr.status, 400); assert.match(badAppr.json.error, /Approach must be one of/);
+
+    // Home pitch: standing default via /pitch and via the fixtures list
+    const badPitch = await reqOn(3225, '/api/worlds/w_seed/pitch', { method: 'POST', cookie: c1, body: { pitch: 'grass' } });
+    assert.equal(badPitch.status, 400);
+    const setPitch = await reqOn(3225, '/api/worlds/w_seed/pitch', { method: 'POST', cookie: c1, body: { pitch: 'bowling' } });
+    assert.equal(setPitch.status, 200);
+    assert.equal(setPitch.json.homePitch, 'bowling');
+    const fxList = await reqOn(3225, '/api/worlds/w_seed/fixtures', { cookie: c1 });
+    const fx = fxList.json.fixtures.find(f => f.id === 'fix_seed');
+    assert.equal(fx.pitch, 'bowling', 'fixtures show the home default pitch');
+    assert.equal(fx.isHome, true);
+
+    // Per-fixture pitch: the away manager cannot touch it (403), the home manager can (200)
+    const awayTry = await reqOn(3225, '/api/worlds/w_seed/fixtures/fix_seed/pitch', { method: 'POST', cookie: c2, body: { pitch: 'batting' } });
+    assert.equal(awayTry.status, 403);
+    const homeSet = await reqOn(3225, '/api/worlds/w_seed/fixtures/fix_seed/pitch', { method: 'POST', cookie: c1, body: { pitch: 'batting' } });
+    assert.equal(homeSet.status, 200);
+    const fxList2 = await reqOn(3225, '/api/worlds/w_seed/fixtures', { cookie: c1 });
+    const fx2 = fxList2.json.fixtures.find(f => f.id === 'fix_seed');
+    assert.equal(fx2.pitch, 'batting', 'the fixture override wins over the home default');
+    assert.equal(fx2.pitchSet, true);
+    const missing = await reqOn(3225, '/api/worlds/w_seed/fixtures/fix_nope/pitch', { method: 'POST', cookie: c1, body: { pitch: 'batting' } });
+    assert.equal(missing.status, 404);
+  } finally { srv.kill('SIGKILL'); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('tactics lock: XI/tactics saves and pitch changes are rejected inside 30 minutes of a match (423)', async () => {
+  const { srv, dir } = await spawnSeededServer(3226, tacticsSeed(true));
+  try {
+    const c1 = await loginOn(3226, 'seed1@example.com');
+    const squad = await reqOn(3226, '/api/worlds/w_seed/squad', { cookie: c1 });
+    const xiLocked = await reqOn(3226, '/api/worlds/w_seed/xi', { method: 'POST', cookie: c1,
+      body: { xi: squad.json.xi, tactics: { battingOrder: squad.json.xi } } });
+    assert.equal(xiLocked.status, 423);
+    assert.match(xiLocked.json.error, /locked for the upcoming match/);
+    const pitchLocked = await reqOn(3226, '/api/worlds/w_seed/fixtures/fix_seed/pitch', { method: 'POST', cookie: c1, body: { pitch: 'batting' } });
+    assert.equal(pitchLocked.status, 423);
+    assert.match(pitchLocked.json.error, /pitch is locked/);
+  } finally { srv.kill('SIGKILL'); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('bug 3 (server): a session cookie stays valid across a server restart (stateless JWT)', async () => {
   // A second instance over the SAME database file + session secret —
   // the "restart" — must accept the cookie issued by the first.
