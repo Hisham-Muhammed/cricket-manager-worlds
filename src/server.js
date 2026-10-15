@@ -17,6 +17,7 @@ const { topBid, validBids, validateBid, placeBid } = require('./bids');
 const { createOffer, applyAccept, closeOffer, offerView } = require('./offers');
 const { defaultTactics, withDefaults, validateTactics, PITCHES } = require('./tactics');
 const { fixturePitch } = require('./matchEngine');
+const { CLUBS, START_BUDGET, fillAiManagers } = require('./aiFill');
 const supa = require('./supabase');
 
 const SECRET = process.env.SESSION_SECRET || 'dev-only-change-me';
@@ -38,8 +39,6 @@ const googleCallbackUrl = () => process.env.GOOGLE_CALLBACK_URL
 // cookie would vanish with the browser session and "log the user
 // out" on refresh/reopen).
 const COOKIE_OPTS = { httpOnly: true, sameSite: 'lax', path: '/', maxAge: 30 * 864e5 };
-const CLUBS = ['Chennai Super Kings','Mumbai Indians','Royal Challengers Bengaluru','Kolkata Knight Riders','Rajasthan Royals','Sunrisers Hyderabad','Delhi Capitals','Punjab Kings','Lucknow Super Giants','Gujarat Titans']; // the original IPL franchises
-const START_BUDGET = 100;
 
 const app = express();
 app.set('trust proxy', true); // hosts (Render/Railway) terminate TLS and proxy http — honour X-Forwarded-Proto/Host
@@ -401,32 +400,9 @@ app.post('/api/worlds/:id/join', auth, (req, res) => {
 });
 
 // ---------- AI managers + creator start ----------
-// An AI manager is a normal manager record flagged ai:true, created
-// internally only: it gets a random, unusable password hash and the
-// login route refuses ai accounts outright, so it can never be signed
-// into. Its membership is identical to a human's (₹100 Cr, empty squad).
-function fillAiManagers(db, w) {
-  const taken = db.memberships.filter(m => m.worldId === w.id).map(m => m.clubName);
-  const free = CLUBS.slice(0, w.numberOfClubs).filter(c => !taken.includes(c));
-  let added = 0;
-  for (const clubName of free) {
-    const short = clubName.split(/\s+/).map(x => x[0]).join('').toUpperCase();
-    let email = `ai.${w.id.slice(-6)}.${short.toLowerCase()}@ai.local`;
-    let n = 2; while (db.users.some(u => u.email === email)) email = `ai.${w.id.slice(-6)}.${short.toLowerCase()}${n++}@ai.local`;
-    const u = { id: id('mgr'), name: `AI Manager — ${short}`, email,
-      passwordHash: bcrypt.hashSync(crypto.randomBytes(32).toString('hex'), 12), // random: unknowable, so no login is possible
-      provider: 'ai', ai: true, profileImage: '', createdAt: nowISO(),
-      stats: { matchesManaged: 0, wins: 0, auctionsWon: 0 }, trophies: [], history: [] };
-    db.users.push(u);
-    const m = { id: id('mem'), worldId: w.id, userId: u.id, clubName, budget: START_BUDGET, ai: true,
-      xi: [], tactics: defaultTactics(), captainId: null, viceCaptainId: null, joinedAt: nowISO(), lastSeenAt: nowISO() };
-    db.memberships.push(m);
-    db.league.push({ id: id('lg'), worldId: w.id, membershipId: m.id, played: 0, won: 0, lost: 0, tied: 0, points: 0, runsFor: 0, runsAgainst: 0, nrr: 0 });
-    emit(db, w.id, 'MANAGER_JOINED', { clubName, ai: true });
-    added++;
-  }
-  return added;
-}
+// fillAiManagers lives in src/aiFill.js — shared with the scheduler,
+// whose automatic world start and stuck-world rescue fill AI clubs the
+// same way this route does for a creator start.
 
 app.post('/api/worlds/:id/start', auth, (req, res) => {
   const db = load(); const w = db.worlds.find(x => x.id === req.params.id);

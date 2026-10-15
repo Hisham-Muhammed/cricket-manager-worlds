@@ -639,3 +639,5 @@ aakkanam").
   world plays out its due fixtures and finishes with a champion.
 
 - 2026-10-14 (later): STAR_BOWLING — real-life bowling-phase preferences hand-authored for 21 star bowlers/all-rounders (Narine powerplay+middle, Kuldeep middle only, Boult powerplay+middle, Rashid middle+death, Bumrah powerplay+death…), overriding the generic tier-derived prefOvers. Tests still 56/56.
+
+- 2026-10-15: No-fixtures bug fix — worlds that started on their schedule (creator never pressed "Start World Now") never got AI managers (fillAiManagers was only called by the creator-start route), so a world with <2 human managers generated ZERO fixtures yet still flipped to ACTIVE_SEASON and could never play or finish a match. fillAiManagers moved to src/aiFill.js (shared); the scheduler now AI-fills on automatic start and again as a season-start safety net, only flips to ACTIVE_SEASON when fixtures were actually generated, and rescues already-stuck ACTIVE_SEASON worlds with zero fixtures (fills AI clubs, restarts the season clock, generates fixtures). New seeded regression test covers both paths.

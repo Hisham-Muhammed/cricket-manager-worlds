@@ -14,6 +14,7 @@ const { simulate } = require('./matchEngine');
 const { withDefaults, buildAutoBowlingPlan } = require('./tactics');
 const { AI_SQUAD_TARGET, topBid, validBids, squadCount, leadingList, validateBid, placeBid } = require('./bids');
 const { expireOffers, aiTransfers } = require('./offers');
+const { fillAiManagers } = require('./aiFill');
 // Share of its budget an AI may have committed to NEW fronts. The rest
 // is a war-chest, kept free so the AI can always defend its targets.
 const AI_WARCHEST_FRACTION = 0.6;
@@ -445,6 +446,12 @@ function tick() {
       // State machine, driven by stored server timestamps
       if (world.state === 'CREATED') { world.state = 'RECRUITING'; changed = true; }
       if (world.state === 'RECRUITING' && world.auctionStartAt && now >= new Date(world.auctionStartAt).getTime()) {
+        // Automatic (scheduled) start fills AI clubs exactly like a
+        // creator start does — without this, a world that started on
+        // its schedule had only the managers who joined by hand, and
+        // with fewer than 2 clubs its season could never produce
+        // fixtures.
+        if (world.aiFill !== false) fillAiManagers(db, world);
         if (world.squadMode === 'draft') { distributeDraft(db, world); world.state = 'SQUAD_BUILDING'; }
         else { world.state = 'AUCTION'; openAuctions(db, world); }
         changed = true;
@@ -454,11 +461,34 @@ function tick() {
         if (world.state === 'SQUAD_BUILDING') { world.state = 'PRE_SEASON'; changed = true; }
       }
       if ((world.state === 'PRE_SEASON' || world.state === 'SQUAD_BUILDING') && world.seasonStartAt && now >= new Date(world.seasonStartAt).getTime()) {
+        if (world.aiFill !== false) fillAiManagers(db, world); // safety net: a season needs at least 2 clubs
         const fx = generateFixtures(db, world);
-        db.fixtures.push(...fx); aiPickTeams(db, world); world.state = 'ACTIVE_SEASON';
-        emit(db, world.id, 'SEASON_STARTED', { fixtures: fx.length }); news(db, world.id, 'SEASON_STARTED', 'Season started', `${fx.length} fixtures generated.`);
-        db.memberships.filter(m => m.worldId === world.id).forEach(m => notify(db, m.userId, world.id, 'SEASON_STARTED', 'Your season has started. First fixture is scheduled.'));
-        changed = true;
+        if (fx.length) {
+          db.fixtures.push(...fx); aiPickTeams(db, world); world.state = 'ACTIVE_SEASON';
+          emit(db, world.id, 'SEASON_STARTED', { fixtures: fx.length }); news(db, world.id, 'SEASON_STARTED', 'Season started', `${fx.length} fixtures generated.`);
+          db.memberships.filter(m => m.worldId === world.id).forEach(m => notify(db, m.userId, world.id, 'SEASON_STARTED', 'Your season has started. First fixture is scheduled.'));
+          changed = true;
+        }
+        // No fixtures (fewer than 2 clubs and AI fill off): stay in the
+        // current state and retry next tick — never flip to an
+        // ACTIVE_SEASON with zero fixtures, which could never play or
+        // finish a match.
+      }
+      if (world.state === 'ACTIVE_SEASON' && !db.fixtures.some(f => f.worldId === world.id)) {
+        // Rescue worlds already stuck in ACTIVE_SEASON with zero
+        // fixtures (started before the automatic AI fill existed):
+        // fill AI clubs, restart the season clock from now and
+        // generate the missing fixtures.
+        if (world.aiFill !== false) fillAiManagers(db, world);
+        world.seasonStartAt = nowISO();
+        const fx = generateFixtures(db, world);
+        if (fx.length) {
+          db.fixtures.push(...fx); aiPickTeams(db, world);
+          emit(db, world.id, 'SEASON_STARTED', { fixtures: fx.length, rescued: true });
+          news(db, world.id, 'SEASON_STARTED', 'Season started', `${fx.length} fixtures generated.`);
+          db.memberships.filter(m => m.worldId === world.id).forEach(m => notify(db, m.userId, world.id, 'SEASON_STARTED', 'Your season has started. First fixture is scheduled.'));
+          changed = true;
+        }
       }
       if (world.state === 'ACTIVE_SEASON') {
         const mine = db.fixtures.filter(f => f.worldId === world.id);
