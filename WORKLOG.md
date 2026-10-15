@@ -637,3 +637,5 @@ aakkanam").
   60–75, morale pulled toward 70, drift ≤ ±1, PRIZE_MONEY /
   NEW_SEASON events, fixtures-released news) while a second live
   world plays out its due fixtures and finishes with a champion.
+
+- 2026-10-14 (later): STAR_BOWLING — real-life bowling-phase preferences hand-authored for 21 star bowlers/all-rounders (Narine powerplay+middle, Kuldeep middle only, Boult powerplay+middle, Rashid middle+death, Bumrah powerplay+death…), overriding the generic tier-derived prefOvers. Tests still 56/56.

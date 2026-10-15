@@ -70,6 +70,35 @@ const STAR_POSITIONS = {
   'Andre Russell': { positions: [5, 6, 7], primary: 6 },
   'Sunil Narine': { positions: [1, 2, 7, 8], primary: 1 }, // pinch-opener who also finishes
 };
+/**
+ * Real-life bowling phases for the star templates, from their actual
+ * IPL/international roles ('powerplay' 1-6, 'middle' 7-15, 'death' 16-20).
+ * Multi-phase is normal — most frontline bowlers work two phases.
+ * Overrides the generic tier-derived prefOvers in the .map below.
+ */
+const STAR_BOWLING = {
+  'Jasprit Bumrah':   ['powerplay', 'death'],   // new ball + the best death bowler in the game
+  'Mohammed Siraj':   ['powerplay', 'death'],   // new ball, returns at the death
+  'Kuldeep Yadav':    ['middle'],               // middle-overs wrist-spin only
+  'Pat Cummins':      ['powerplay', 'death'],   // opens, closes; some middle
+  'Trent Boult':      ['powerplay', 'middle'],  // new-ball specialist, rarely death
+  'Rashid Khan':      ['middle', 'death'],      // 7-15 banker, used at death when needed; not a PP opener
+  'Shaheen Afridi':   ['powerplay', 'death'],   // new ball swing + death yorkers
+  'Mitchell Starc':   ['powerplay', 'death'],   // new ball + death
+  'Jofra Archer':     ['powerplay', 'death'],   // enforcer: PP + death (some middle)
+  'Kagiso Rabada':    ['powerplay', 'death'],   // new ball + death (some middle)
+  'Arshdeep Singh':   ['powerplay', 'death'],   // left-arm new ball + death specialist
+  'Hardik Pandya':    ['powerplay', 'middle'],  // new-ball swing + middle; rarely death in recent IPL seasons
+  'Ravindra Jadeja':  ['powerplay', 'middle'],  // mostly middle, regular PP overs for CSK/India
+  'Ben Stokes':       ['middle', 'death'],      // middle-overs seam + death option
+  'Shakib Al Hasan':  ['powerplay', 'middle'],  // frequently opens the bowling in T20
+  'Wanindu Hasaranga':['middle', 'death'],      // leg-spin middle, some death
+  'Axar Patel':       ['powerplay', 'middle'],  // bowls heavily in the PP for DC/India
+  'Sunil Narine':     ['powerplay', 'middle'],  // opens the bowling, middle overs; almost never death
+  'Andre Russell':    ['middle', 'death'],      // short spells: middle + death
+  'Glenn Maxwell':    ['powerplay', 'middle'],  // off-spin used in PP + middle (part-time)
+  'Rachin Ravindra':  ['middle'],               // part-time left-arm spin, middle only
+};
 module.exports = [
   ['Virat Kohli',37,'Batsman','India',93,14],['Rohit Sharma',39,'Batsman','India',92,13],
   ['Jasprit Bumrah',32,'Bowler','India',94,15],['MS Dhoni',45,'Wicket-Keeper','India',89,10],
@@ -496,7 +525,10 @@ module.exports = [
   if (star) {
     batPositions = star.positions;
     prefBatPos = star.primary;
-  } else {
+  }
+  const starBowl = STAR_BOWLING[name];
+  if (starBowl) prefOvers = starBowl;
+  if (!star) {
     if (role === 'Batsman') batPositions = batting >= 86 ? pick([[1, 2], [2, 3]]) : batting >= 76 ? [3, 4, 5] : [5, 6];
     else if (role === 'Wicket-Keeper') batPositions = batting >= 86 ? [1, 2] : [4, 5];
     else if (role === 'All-Rounder') batPositions = batting >= 82 ? [4, 5, 6] : [5, 6, 7];
