@@ -1370,3 +1370,53 @@ test('season rollover: prizes paid, table reset, squads retained, season 2 fixtu
     assert.ok(newsB.json.news.some(n => /^Season 1 complete — .+ are champions!$/.test(n.headline)), 'champions news posted');
   } finally { srv.kill('SIGKILL'); fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('no-fixtures regression: scheduled start AI-fills clubs and produces fixtures; a stuck ACTIVE_SEASON world with zero fixtures is rescued (seeded)', async () => {
+  const hash = bcryptjs.hashSync('secret1', 4);
+  const now = Date.now();
+  const iso = t => new Date(t).toISOString();
+  const users = [
+    { id: 'u_a1', name: 'Auto One', email: 'auto1@example.com', passwordHash: hash, provider: 'email', profileImage: '', createdAt: iso(now), stats: {}, trophies: [], history: [] },
+  ];
+  const base = (id, name, extra) => ({ id, name, description: '', creatorId: 'u_a1', format: 'League (Home & Away)',
+    competitionStructure: 'Round-robin league', matchIntervalDays: 3, matchIntervalMinutes: 10, matchTime: '20:00',
+    pace: 'fast', timezone: 'Asia/Kolkata', seasonLength: '1 season',
+    startDate: iso(now - 86400000), auctionStartAt: iso(now - 3600000), seasonStartAt: iso(now - 3600000),
+    passwordHash: null, squadMode: 'draft', seasonNumber: 1, createdAt: iso(now - 86400000), ...extra });
+  const mkMem = (id, worldId) => ({ id, worldId, userId: 'u_a1', clubName: 'Chennai Super Kings', budget: 100, xi: [],
+    tactics: { formation: 'Balanced', battingApproach: 'Balanced', bowlingApproach: 'Balanced' },
+    captainId: null, viceCaptainId: null, joinedAt: iso(now - 86400000), lastSeenAt: iso(now) });
+  const seed = {
+    users,
+    worlds: [
+      base('w_auto', 'Auto Start League', { numberOfClubs: 4, state: 'RECRUITING', seasonStartAt: iso(now - 60000) }), // starts on schedule, creator never pressed Start
+      base('w_stuck', 'Stuck League', { numberOfClubs: 2, state: 'ACTIVE_SEASON' }),  // flipped to ACTIVE_SEASON with no fixtures by the old bug
+    ],
+    memberships: [mkMem('mem_a1', 'w_auto'), mkMem('mem_s1', 'w_stuck')],
+    worldPlayers: [], auctions: [], bids: [], fixtures: [], events: [], notifications: [], news: [], watchlist: [], offers: [],
+    league: [
+      { id: 'lga1', worldId: 'w_auto', membershipId: 'mem_a1', played: 0, won: 0, lost: 0, tied: 0, points: 0, runsFor: 0, runsAgainst: 0, nrr: 0 },
+      { id: 'lgs1', worldId: 'w_stuck', membershipId: 'mem_s1', played: 0, won: 0, lost: 0, tied: 0, points: 0, runsFor: 0, runsAgainst: 0, nrr: 0 },
+    ],
+  };
+  const { srv, dir } = await spawnTickingServer(3232, seed);
+  try {
+    const c1 = await loginOn(3232, 'auto1@example.com');
+    const auto = await pollUntil(async () => {
+      const w = await reqOn(3232, '/api/worlds/w_auto', { cookie: c1 });
+      return w.json.world.state === 'ACTIVE_SEASON' ? w.json : null;
+    });
+    assert.ok(auto, 'scheduled-start world should reach ACTIVE_SEASON');
+    assert.equal(auto.members.length, 4, 'AI managers filled the empty clubs on the scheduled start');
+    const fxA = await reqOn(3232, '/api/worlds/w_auto/fixtures', { cookie: c1 });
+    assert.equal(fxA.json.fixtures.length, 12, 'fixtures generated for the auto-started world (4 clubs, home & away = 12 matches)');
+    const stuck = await pollUntil(async () => {
+      const fx = await reqOn(3232, '/api/worlds/w_stuck/fixtures', { cookie: c1 });
+      return fx.json.fixtures.length ? fx.json : null;
+    });
+    assert.ok(stuck, 'stuck ACTIVE_SEASON world should be rescued with fixtures');
+    assert.equal(stuck.fixtures.length, 2, 'rescued world has its fixtures (2 clubs, home & away)');
+    const wS = await reqOn(3232, '/api/worlds/w_stuck', { cookie: c1 });
+    assert.equal(wS.json.members.length, 2, 'rescue filled the second club with an AI manager');
+  } finally { srv.kill('SIGKILL'); fs.rmSync(dir, { recursive: true, force: true }); }
+});
